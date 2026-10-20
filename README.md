@@ -82,6 +82,24 @@ Runtime is dominated by candidate generation and rasterization (about 2–3 s, p
 - Synthetic Gaussian terrain. Headings use the math convention (0 = east, CCW); JSON uses `heading_deg`.
 - Separation is checked only while both aircraft are airborne in the plan horizon (up to `r_exempt`).
 
+## Caveats
+
+How much the results prove:
+- The greedy baseline uses this repo's candidate set. It is not production's `PrioritizedTrajectoryPlanner`, which also has timing exponents and sinusoidal reroutes. "Rescued" counts likely overstate the gain over production.
+- The bench uses only this repo's generator with 2 targets × 3 aircraft. Scaling is untested; selection is exponential in the worst case, and each aircraft is capped at 64 candidates.
+- Cost reductions are measured with hand-tuned cost weights.
+
+Model gaps:
+- The voxel check is conservative. No missed conflicts were found in testing, but the false-positive rate (safe plans rejected) is not measured.
+- Separation is not checked within `r_exempt` (250 m) of the aimpoint.
+- No wind, constant speed per candidate, turn radius independent of speed, 1 s timing jitter.
+- The aircraft that sets `T` flies only 0.5 m/s below `v_max`, so a delay makes it late.
+- `terrain_margin` (25 m) is a hand-tuned buffer for the conservatism of the voxel terrain check.
+
+Coverage:
+- Loiter geometries were never selected in the 200-seed bench; they are largely untested end to end.
+- End-to-end tests cover 3 seeds.
+
 ## Where this maps back to autonomy-engine
 
 | here | production |
