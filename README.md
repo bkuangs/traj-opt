@@ -18,12 +18,12 @@ uv run traj-opt gen my.json --seed 3                               # write a sce
 uv run pytest
 ```
 
-| scenario | what it shows | greedy | bnb |
-|---|---|---|---|
-| `crossing` | two 3-ship flights pass head-on through the same midfield | NO_SAFE_PLAN | solved (altitude layers + approach sectors) |
-| `greedy_fails` | first-fit picks for high-priority aircraft block later ones | NO_SAFE_PLAN | solved (bulges + alternate ingress) |
-| `terrain` | hills block the direct corridors at the start altitude | NO_SAFE_PLAN | solved (terrain-aware cruise floor) |
-| `sync_padding` | a close-in aircraft must add about 2 km of path to arrive on time | solved | same plan |
+| scenario | what it shows | greedy | sector_greedy | bnb |
+|---|---|---|---|---|
+| `crossing` | two 3-ship flights pass head-on through the same midfield | NO_SAFE_PLAN | NO_SAFE_PLAN | solved (altitude layers + approach sectors) |
+| `greedy_fails` | first-fit picks for high-priority aircraft block later ones | NO_SAFE_PLAN | solved, same cost as bnb | solved (bulges + alternate ingress) |
+| `terrain` | hills block the direct corridors at the start altitude | NO_SAFE_PLAN | NO_SAFE_PLAN | solved (terrain-aware cruise floor) |
+| `sync_padding` | a close-in aircraft must add about 2 km of path to arrive on time | solved | solved | same plan |
 
 ## Pipeline
 
@@ -44,6 +44,7 @@ scenario ─► common ingress time T ─► candidates per aircraft ─► terr
 3. **Voxels** (`voxels.py`). Trajectories are rasterized into `(x, y, z, t)` cells (25 m × 10 m × 1 s), then inflated by `sep/2 + nav uncertainty` and `timing jitter`. Two candidates conflict when their inflated sets intersect, as in the production `SweptVolumeRasterizer`. Terrain is a conservative static layer. Same-target approach-sector conflicts and ingress-point spacing conflicts are added as extra edges. Lookups use an inverted index (sorted keys + bitmask), not all-pairs intersection.
 4. **Select** (`select.py`).
    - `greedy`: the production behaviour. Fixed priority order (target value), first-fit, `NO_SAFE_PLAN` if anyone is blocked.
+   - `sector_greedy`: a cheap middle ground. For each target, pick the cheapest combination of approach angles that keeps every pair ≥ 45° apart. Then run greedy restricted to those angles.
    - `bnb`: joint optimum over one candidate per aircraft, or *drop* at cost `drop_cost × value`. Depth-first search:
      - branches on the most-constrained aircraft first, cheapest candidates first;
      - admissible bound: cost so far + each remaining aircraft's cheapest unblocked option;
@@ -63,6 +64,7 @@ scenario ─► common ingress time T ─► candidates per aircraft ─► terr
 
 ```
 greedy  all aircraft planned : 128/200
+sector_greedy all planned    : 179/200   cost above bnb: mean 0.4%, equal to bnb in 167/179
 bnb     all aircraft planned : 190/200   partial (some dropped): 10
 bnb rescued greedy failures  : 62
 bnb cheaper than greedy      : 57/128  mean cost reduction 3.6%
@@ -77,6 +79,15 @@ robustness of bnb plans (190 plans x 100 trials, mean over plans):
 ```
 
 Runtime is dominated by candidate generation and rasterization (about 2–3 s, pure numpy). Selection takes milliseconds. Partial plans are proven optimal (node limit not reached). In each, one aircraft's few remaining candidates all conflict with better uses of the airspace, so it is dropped. The fix for these cases is more candidate diversity (see simplifications), not more search.
+
+**Why greedy fails, and how much a sector step fixes.**
+
+Of the 62 scenarios branch and bound rescues from greedy, 61 fail because an aircraft's teammate on the same target takes the approach arc it needs: the 45° sector rule blocks it. The stuck aircraft is usually the one that sets `T`, with few options (median 6 candidates). Branch and bound usually fixes this by moving one teammate to a neighbouring ingress angle.
+
+`sector_greedy` targets exactly that failure:
+- It plans everyone in 179/200 scenarios, versus 128 for greedy and 190 for branch and bound, at about 0.4% above the optimal cost.
+- Its 11 remaining failures where branch and bound succeeds are all blocked by an aircraft on the *other* target. Branch and bound picks different sectors there, which needs airspace awareness.
+- It fails in 8 scenarios where plain greedy succeeds, because committing to sectors removes options. Sector-greedy with a fallback to greedy would reach 187/200.
 
 **Robustness findings** (same 200 seeds, 100 trials per plan):
 
@@ -94,7 +105,7 @@ Runtime is dominated by candidate generation and rasterization (about 2–3 s, p
 - `test_dubins.py`: endpoints, headings, length, curvature bound, chain continuity (random poses).
 - `test_voxels.py`: head-on, crossing, time-separated crossing, parallel tracks, vertical layers, trailing within jitter, coarse-sampling guard, terrain. Also a **no-false-negatives property test**: every random pair that loses separation in continuous time must be flagged by the voxels.
 - `test_select.py`: `bnb == brute_force` on 300 random instances; `bnb ≤ greedy` whenever greedy succeeds.
-- `test_e2e.py`: plans from the full pipeline pass the verifier; determinism; JSON round trip.
+- `test_e2e.py`: plans from the full pipeline pass the verifier; determinism; JSON round trip; sector assignment respects 45°; `bnb ≤ sector_greedy`.
 - `test_robust.py`: zero dispersion reproduces the plan; determinism; the speed margin reduces arrival misses; large errors are detected as separation loss.
 
 ## Deliberate simplifications
@@ -131,5 +142,6 @@ Coverage:
 | speed band margin | `TimedIngressPlanner` zigzag call planned at exactly `minSpeed` |
 | `voxels.inflated_keys` | `SweptVolumeRasterizer` |
 | `voxels.hits_terrain` | new static terrain layer in `VoxelReservationTable` |
+| `select.sector_greedy` | minimal change to production: joint sector assignment per target before the existing first-fit loop |
 | `select.bnb` | replace the first-fit loop in `PrioritizedTrajectoryPlanner`, then replay winners through `tryReserve` |
 | `verify` | independent post-check before publishing |

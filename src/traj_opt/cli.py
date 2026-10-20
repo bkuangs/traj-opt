@@ -56,7 +56,7 @@ def _bench_one(seed: int, mc: int = 0) -> dict:
     sc = scn.generate(seed)
     prob = build_problem(sc)
     row = {"seed": seed, "t_build": prob.stats["t_candidates_s"] + prob.stats["t_conflicts_s"]}
-    for s in ("greedy", "bnb"):
+    for s in ("greedy", "sector_greedy", "bnb"):
         plan, rep = solve(prob, s)
         row[s] = (plan.status, plan.cost, rep.ok, plan.extra["t_solve_s"], plan.nodes)
         if s == "bnb" and mc and plan.status == "CONFLICT_FREE":
@@ -76,9 +76,16 @@ def cmd_bench(args) -> None:
     both = [r for r in g_ok if r["bnb"][0] == "CONFLICT_FREE"]
     better = [r for r in both if r["bnb"][1] < r["greedy"][1] - 1e-9]
     worse = [r["seed"] for r in both if r["bnb"][1] > r["greedy"][1] + 1e-9]
-    bad_verify = [(r["seed"], s) for r in rows for s in ("greedy", "bnb") if not r[s][2]]
+    bad_verify = [(r["seed"], s) for r in rows for s in ("greedy", "sector_greedy", "bnb") if not r[s][2]]
+    sg_ok = [r for r in rows if r["sector_greedy"][0] == "CONFLICT_FREE"]
+    sg_gap = [(r["sector_greedy"][1] - r["bnb"][1]) / r["bnb"][1] for r in sg_ok if r["bnb"][0] == "CONFLICT_FREE"]
     print(f"seeds {args.start}..{args.start + n - 1}")
     print(f"greedy  all aircraft planned : {len(g_ok)}/{n}")
+    print(
+        f"sector_greedy all planned    : {len(sg_ok)}/{n}   "
+        f"cost above bnb: mean {100 * statistics.mean(sg_gap or [0]):.1f}%, "
+        f"equal to bnb in {sum(g < 1e-9 for g in sg_gap)}/{len(sg_gap)}"
+    )
     print(f"bnb     all aircraft planned : {len(b_full)}/{n}   partial (some dropped): {len(b_part)}")
     print(f"bnb rescued greedy failures  : {len(rescued)}  e.g. seeds {rescued[:10]}")
     if both:
@@ -120,7 +127,7 @@ def main(argv: list[str] | None = None) -> None:
 
     r = sub.add_parser("run", help="plan, verify, and visualize one scenario")
     scenario_args(r)
-    r.add_argument("--solver", choices=["greedy", "bnb", "both"], default="both")
+    r.add_argument("--solver", choices=["greedy", "sector_greedy", "bnb", "both"], default="both")
     r.add_argument("--gif", help="write an animation, e.g. out.gif")
     r.add_argument("--png", help="write a still, e.g. out.png")
     r.add_argument("--no-show", action="store_true", help="do not open a window")

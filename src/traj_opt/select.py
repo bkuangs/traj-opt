@@ -1,6 +1,9 @@
 """Choose one candidate (or drop) per aircraft so no two chosen candidates conflict.
 
 greedy: the production approach. Fixed priority order, first conflict-free candidate, else NO_SAFE_PLAN.
+sector_greedy: per target, jointly assign approach angles (all pairs >= min_sector apart, minimum total
+        best-candidate cost), then greedy restricted to the assigned angles. A cheap fix for the dominant
+        greedy failure (teammates competing for the same approach arc).
 bnb:    joint optimum. Depth-first branch-and-bound that branches on the most-constrained aircraft next
         (fewest unblocked candidates), cheapest candidates first, with an admissible bound (cost so far +
         each remaining aircraft's cheapest still-unblocked option or its drop cost). The incumbent starts
@@ -10,6 +13,7 @@ bnb:    joint optimum. Depth-first branch-and-bound that branches on the most-co
 from __future__ import annotations
 
 import itertools
+import math
 
 from .model import Candidate, Plan, Scenario
 
@@ -40,6 +44,39 @@ def greedy(sc: Scenario, T: float, cands: dict[int, list[Candidate]], conflicts:
         chosen[ac] = pick
         blocked |= conflicts[pick.idx]
     return Plan("greedy", T, chosen, sum(c.cost for c in chosen.values()))
+
+
+def assign_sectors(sc: Scenario, cands: dict[int, list[Candidate]]) -> dict[int, float] | None:
+    """Approach angle per aircraft: cheapest per-target combination with all same-target pairs >= min_sector."""
+    min_sep = math.radians(sc.params.min_sector_deg) - 1e-9
+    out: dict[int, float] = {}
+    for tgt in sc.targets:
+        ids = list(tgt.aircraft)
+        best_at = [{} for _ in ids]  # angle -> cheapest candidate cost at that angle
+        for k, ac in enumerate(ids):
+            for c in cands[ac]:
+                best_at[k][c.ingress_angle] = min(best_at[k].get(c.ingress_angle, math.inf), c.cost)
+        best = None
+        for combo in itertools.product(*[sorted(b) for b in best_at]):
+            if all(
+                abs((x - y + math.pi) % (2 * math.pi) - math.pi) >= min_sep for x, y in itertools.combinations(combo, 2)
+            ):
+                cost = sum(b[a] for b, a in zip(best_at, combo, strict=True))
+                if best is None or cost < best[0]:
+                    best = (cost, combo)
+        if best is None:
+            return None
+        out.update(zip(ids, best[1], strict=True))
+    return out
+
+
+def sector_greedy(sc: Scenario, T: float, cands: dict[int, list[Candidate]], conflicts: dict[int, set[int]]) -> Plan:
+    sectors = assign_sectors(sc, cands)
+    if sectors is None:
+        return Plan("sector_greedy", T, {}, float("inf"), status="NO_SAFE_PLAN", reason="no valid sector assignment")
+    plan = greedy(sc, T, {ac: [c for c in cs if c.ingress_angle == sectors[ac]] for ac, cs in cands.items()}, conflicts)
+    plan.solver = "sector_greedy"
+    return plan
 
 
 def bnb(sc: Scenario, T: float, cands: dict[int, list[Candidate]], conflicts: dict[int, set[int]]) -> Plan:

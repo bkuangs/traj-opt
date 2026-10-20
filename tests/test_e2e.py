@@ -1,3 +1,5 @@
+import itertools
+
 import pytest
 
 from traj_opt import scenario
@@ -36,3 +38,21 @@ def test_json_roundtrip(tmp_path):
     sc = scenario.generate(1)
     scenario.save(sc, tmp_path / "s.json")
     assert scenario.load(tmp_path / "s.json") == sc
+
+
+def test_sector_greedy_valid_and_not_better_than_bnb(problem):
+    import math
+
+    from traj_opt.select import assign_sectors
+
+    sec = assign_sectors(problem.sc, problem.cands)
+    for tgt in problem.sc.targets:
+        for a, b in itertools.combinations(tgt.aircraft, 2):
+            d = abs((sec[a] - sec[b] + math.pi) % (2 * math.pi) - math.pi)
+            assert d >= math.radians(problem.sc.params.min_sector_deg) - 1e-9
+    sg, rep = solve(problem, "sector_greedy")
+    bb, _ = solve(problem, "bnb")
+    if sg.status == "CONFLICT_FREE":
+        assert rep.ok, rep.violations
+        assert all(c.ingress_angle == sec[a] for a, c in sg.chosen.items())
+        assert bb.cost <= sg.cost + 1e-9
