@@ -8,6 +8,7 @@ from concurrent.futures import ProcessPoolExecutor
 
 from . import scenario as scn
 from .planner import build_problem, solve
+from .robust import monte_carlo
 
 
 def _load(args) -> scn.Scenario:
@@ -32,6 +33,8 @@ def cmd_run(args) -> None:
     results = [(s, *solve(prob, s)) for s in solvers]
     for _, plan, rep in results:
         print(_summary(prob, plan, rep))
+        if args.mc and plan.status != "NO_SAFE_PLAN":
+            print("  " + monte_carlo(sc, plan, trials=args.mc).summary())
     if args.no_show and not (args.gif or args.png):
         return
     import matplotlib
@@ -49,19 +52,22 @@ def cmd_run(args) -> None:
             fig.savefig(args.png.replace(".png", f"{suffix}.png"), dpi=110)
 
 
-def _bench_one(seed: int) -> dict:
+def _bench_one(seed: int, mc: int = 0) -> dict:
     sc = scn.generate(seed)
     prob = build_problem(sc)
     row = {"seed": seed, "t_build": prob.stats["t_candidates_s"] + prob.stats["t_conflicts_s"]}
     for s in ("greedy", "bnb"):
         plan, rep = solve(prob, s)
         row[s] = (plan.status, plan.cost, rep.ok, plan.extra["t_solve_s"], plan.nodes)
+        if s == "bnb" and mc and plan.status == "CONFLICT_FREE":
+            row["mc"] = monte_carlo(sc, plan, trials=mc)
     return row
 
 
 def cmd_bench(args) -> None:
     with ProcessPoolExecutor(args.jobs) as ex:
-        rows = list(ex.map(_bench_one, range(args.start, args.start + args.seeds)))
+        seeds = range(args.start, args.start + args.seeds)
+        rows = list(ex.map(_bench_one, seeds, [args.mc] * len(seeds)))
     n = len(rows)
     g_ok = [r for r in rows if r["greedy"][0] == "CONFLICT_FREE"]
     b_full = [r for r in rows if r["bnb"][0] == "CONFLICT_FREE"]
@@ -84,6 +90,16 @@ def cmd_bench(args) -> None:
         f"build time mean {statistics.mean(r['t_build'] for r in rows):.2f}s, "
         f"bnb solve max {max(r['bnb'][3] for r in rows) * 1000:.1f}ms, nodes max {max(r['bnb'][4] for r in rows)}"
     )
+    mcs = [r["mc"] for r in rows if "mc" in r]
+    if mcs:
+        print(f"robustness of bnb plans ({len(mcs)} plans x {args.mc} trials, mean over plans):")
+        for name in ("p_sep_loss", "p_terrain", "p_arrival_miss"):
+            vals = [getattr(m, name) for m in mcs]
+            print(f"  {name:15s} mean {statistics.mean(vals):6.1%}   plans with any: {sum(v > 0 for v in vals)}")
+        print(
+            f"  arrival_err_p95 median {statistics.median(m.arrival_err_p95 for m in mcs):.1f}s, "
+            f"min_sep_p05 median {statistics.median(m.min_sep_p05 for m in mcs):.2f}"
+        )
 
 
 def cmd_gen(args) -> None:
@@ -108,12 +124,14 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--gif", help="write an animation, e.g. out.gif")
     r.add_argument("--png", help="write a still, e.g. out.png")
     r.add_argument("--no-show", action="store_true", help="do not open a window")
+    r.add_argument("--mc", type=int, default=200, help="Monte Carlo robustness trials (0 = off)")
     r.set_defaults(func=cmd_run)
 
     b = sub.add_parser("bench", help="greedy vs branch-and-bound over random seeds")
     b.add_argument("--seeds", type=int, default=200)
     b.add_argument("--start", type=int, default=0)
     b.add_argument("--jobs", type=int, default=None)
+    b.add_argument("--mc", type=int, default=0, help="Monte Carlo trials per bnb plan (0 = off)")
     b.set_defaults(func=cmd_bench)
 
     g = sub.add_parser("gen", help="write a generated scenario to JSON")

@@ -32,7 +32,7 @@ class Params:
     r_exempt: float = 250.0  # trajectories end here; converging inside is intended
     # Timing
     schedule_margin: float = 5.0
-    speed_margin: float = 0.5  # plan inside [v_min + m, v_max - m] to keep control authority
+    speed_margin: float = 0.15  # fraction of (v_max - v_min) kept free at each end of the band for timing control
     sync_tolerance: float = 0.1
     # Candidate families
     alt_step: float = 40.0

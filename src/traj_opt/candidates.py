@@ -30,7 +30,8 @@ def ingress_options(sc: Scenario, ac: Aircraft, tgt: Target) -> list[tuple[float
 
 
 def speed_band(sc: Scenario, ac: Aircraft) -> tuple[float, float]:
-    return ac.v_min + sc.params.speed_margin, ac.v_max - sc.params.speed_margin
+    m = sc.params.speed_margin * (ac.v_max - ac.v_min)
+    return ac.v_min + m, ac.v_max - m
 
 
 def common_ingress_time(sc: Scenario) -> float:
