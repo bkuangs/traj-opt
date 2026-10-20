@@ -66,6 +66,7 @@ def generate(
     spawn_radius: tuple[float, float] = (3000.0, 6000.0),
     n_hills: int = 6,
     params: Params | None = None,
+    target_spread: float = 1500.0,
 ) -> Scenario:
     """Random scenario: targets near the origin, aircraft spawned on an annulus, Gaussian hills."""
     rng = np.random.default_rng(seed)
@@ -83,7 +84,7 @@ def generate(
     targets, aircraft = [], []
     ac_id = 1
     for k in range(n_targets):
-        tx, ty = rng.uniform(-1500, 1500, 2)
+        tx, ty = rng.uniform(-target_spread, target_spread, 2)
         ids = []
         for _ in range(per_target):
             r = rng.uniform(*spawn_radius)

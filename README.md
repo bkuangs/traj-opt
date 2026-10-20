@@ -14,6 +14,7 @@ uv run traj-opt run scenarios/crossing.json --solver both          # interactive
 uv run traj-opt run --seed 16 --solver bnb --png out.png --no-show  # random scenario, still image
 uv run traj-opt run scenarios/crossing.json --gif out.gif --no-show
 uv run traj-opt bench --seeds 200 --mc 100                         # greedy vs bnb + Monte Carlo robustness
+uv run traj-opt bench --seeds 100 --targets 3 --per-target 4 --spread 800  # denser airspace
 uv run traj-opt gen my.json --seed 3                               # write a scenario to edit by hand
 uv run pytest
 ```
@@ -70,7 +71,11 @@ bnb rescued greedy failures  : 62
 bnb cheaper than greedy      : 57/128  mean cost reduction 3.6%
 bnb worse than greedy (bug)  : []
 verifier failures (bug)      : []
-build time mean 3.17s, bnb solve max 540ms, nodes max 114232
+build time (shared) mean 3.27s
+  greedy        solve ms: mean     0.15  p95     0.27  max     5.04
+  sector_greedy solve ms: mean     0.35  p95     0.57  max     9.81
+  bnb           solve ms: mean    10.27  p95    43.30  max   535.73
+  bnb nodes max 114232, node limit hit: 0
 robustness of bnb plans (190 plans x 100 trials, mean over plans):
   p_sep_loss      mean   0.0%   plans with any: 1
   p_terrain       mean   0.0%   plans with any: 0
@@ -100,6 +105,20 @@ Of the 62 scenarios branch and bound rescues from greedy, 61 fail because an air
 - With the old 0.5 m/s margin, the aircraft that sets `T` hits `v_max` under a headwind or a late start and arrives late. The 15% margin costs 2 fully planned scenarios and removes most arrival misses.
 - Timing padding that grows with time was tried and reverted. With schedule tracking, timing error is largest at the start (about 5.5 s p95, from the start delay) and settles to about 0.8 s within 30 s. So padding that grows over the flight is the wrong shape; it gave no benefit and was 1.7× slower to build. The fixed 1 s jitter matches the settled error.
 
+**Denser airspace** (`--targets/--per-target/--spread`, 100 seeds each; targets drawn in ±spread m). Solve times are relative only: the five runs shared the CPU, so absolute times are about 6× too high. The single-run baseline above is the absolute reference.
+
+| targets × per target, spread | greedy | sector_greedy | bnb (partial) | sector_greedy cost above bnb | bnb solve mean / p95 / max | bnb node-limit hits | greedy / sector_greedy solve max |
+|---|---|---|---|---|---|---|---|
+| 2×3, ±1500 (default) | 68 | 90 | 96 (4) | 0.5% | 30 ms / 165 ms / 0.7 s | 0 | 5 / 51 ms |
+| 2×3, ±600 | 64 | 71 | 94 (6) | 0.4% | 15 ms / 71 ms / 0.4 s | 0 | 8 / 54 ms |
+| 3×3, ±1000 | 50 | 55 | 92 (8) | 1.6% | 0.3 s / 1.8 s / 5.2 s | 2 | 27 / 41 ms |
+| 4×3, ±1000 | 39 | 31 | 86 (14) | 1.2% | 1.6 s / 7.6 s / 14 s | 23 | 23 / 305 ms |
+| 3×4, ±800 | 17 | 41 | 76 (24) | 1.1% | 2.7 s / 9.7 s / 22 s | 31 | 37 / 77 ms |
+
+- The gap between greedy and bnb grows with density, from +28 to +59 fully planned scenarios per 100. With more targets, most failures come from conflicts between different targets, which the per-target sector step cannot see. At 4×3, sector_greedy is worse than plain greedy.
+- 4 aircraft on one target are where the sector step helps most (17 → 41). It is also where the candidate set is too small: with 4 ingress angles 30° apart and a 45° minimum spacing, at most 3 aircraft fit cleanly.
+- Runtime: greedy and sector_greedy stay in milliseconds. bnb goes from milliseconds to seconds and hits the 200k node limit in up to 31% of dense scenarios. When it does, it returns the best plan found so far, which is never worse than greedy-with-drops but is no longer proven optimal. Candidate build time grows roughly linearly with the number of aircraft and stays the dominant cost at the default density.
+
 ## Tests
 
 - `test_dubins.py`: endpoints, headings, length, curvature bound, chain continuity (random poses).
@@ -119,7 +138,7 @@ Of the 62 scenarios branch and bound rescues from greedy, 61 fail because an air
 
 How much the results prove:
 - The greedy baseline uses this repo's candidate set. It is not production's `PrioritizedTrajectoryPlanner`, which also has timing exponents and sinusoidal reroutes. "Rescued" counts likely overstate the gain over production.
-- The bench uses only this repo's generator with 2 targets × 3 aircraft. Scaling is untested; selection is exponential in the worst case, and each aircraft is capped at 64 candidates.
+- The bench uses only this repo's generator, with up to 12 aircraft in the density sweep. Selection is exponential in the worst case (bnb hits its node limit in dense scenarios), and each aircraft is capped at 64 candidates.
 - Cost reductions are measured with hand-tuned cost weights.
 
 Model gaps:

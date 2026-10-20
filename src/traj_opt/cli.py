@@ -7,6 +7,7 @@ import statistics
 from concurrent.futures import ProcessPoolExecutor
 
 from . import scenario as scn
+from .model import Params
 from .planner import build_problem, solve
 from .robust import monte_carlo
 
@@ -14,7 +15,7 @@ from .robust import monte_carlo
 def _load(args) -> scn.Scenario:
     if args.scenario:
         return scn.load(args.scenario)
-    return scn.generate(args.seed, n_targets=args.targets, per_target=args.per_target)
+    return scn.generate(args.seed, n_targets=args.targets, per_target=args.per_target, target_spread=args.spread)
 
 
 def _summary(prob, plan, rep) -> str:
@@ -52,8 +53,8 @@ def cmd_run(args) -> None:
             fig.savefig(args.png.replace(".png", f"{suffix}.png"), dpi=110)
 
 
-def _bench_one(seed: int, mc: int = 0) -> dict:
-    sc = scn.generate(seed)
+def _bench_one(seed: int, mc: int = 0, targets: int = 2, per_target: int = 3, spread: float = 1500.0) -> dict:
+    sc = scn.generate(seed, n_targets=targets, per_target=per_target, target_spread=spread)
     prob = build_problem(sc)
     row = {"seed": seed, "t_build": prob.stats["t_candidates_s"] + prob.stats["t_conflicts_s"]}
     for s in ("greedy", "sector_greedy", "bnb"):
@@ -67,7 +68,10 @@ def _bench_one(seed: int, mc: int = 0) -> dict:
 def cmd_bench(args) -> None:
     with ProcessPoolExecutor(args.jobs) as ex:
         seeds = range(args.start, args.start + args.seeds)
-        rows = list(ex.map(_bench_one, seeds, [args.mc] * len(seeds)))
+        k = len(seeds)
+        rows = list(
+            ex.map(_bench_one, seeds, [args.mc] * k, [args.targets] * k, [args.per_target] * k, [args.spread] * k)
+        )
     n = len(rows)
     g_ok = [r for r in rows if r["greedy"][0] == "CONFLICT_FREE"]
     b_full = [r for r in rows if r["bnb"][0] == "CONFLICT_FREE"]
@@ -79,7 +83,10 @@ def cmd_bench(args) -> None:
     bad_verify = [(r["seed"], s) for r in rows for s in ("greedy", "sector_greedy", "bnb") if not r[s][2]]
     sg_ok = [r for r in rows if r["sector_greedy"][0] == "CONFLICT_FREE"]
     sg_gap = [(r["sector_greedy"][1] - r["bnb"][1]) / r["bnb"][1] for r in sg_ok if r["bnb"][0] == "CONFLICT_FREE"]
-    print(f"seeds {args.start}..{args.start + n - 1}")
+    print(
+        f"seeds {args.start}..{args.start + n - 1}: {args.targets} targets x {args.per_target} aircraft, "
+        f"target spread +-{args.spread:.0f} m"
+    )
     print(f"greedy  all aircraft planned : {len(g_ok)}/{n}")
     print(
         f"sector_greedy all planned    : {len(sg_ok)}/{n}   "
@@ -93,10 +100,15 @@ def cmd_bench(args) -> None:
         print(f"bnb cheaper than greedy      : {len(better)}/{len(both)}  mean cost reduction {100 * saving:.1f}%")
     print(f"bnb worse than greedy (bug)  : {worse}")
     print(f"verifier failures (bug)      : {bad_verify}")
-    print(
-        f"build time mean {statistics.mean(r['t_build'] for r in rows):.2f}s, "
-        f"bnb solve max {max(r['bnb'][3] for r in rows) * 1000:.1f}ms, nodes max {max(r['bnb'][4] for r in rows)}"
-    )
+    print(f"build time (shared) mean {statistics.mean(r['t_build'] for r in rows):.2f}s")
+    for s in ("greedy", "sector_greedy", "bnb"):
+        ts = sorted(r[s][3] * 1000 for r in rows)
+        print(
+            f"  {s:13s} solve ms: mean {statistics.mean(ts):8.2f}  "
+            f"p95 {ts[int(0.95 * (n - 1))]:8.2f}  max {ts[-1]:8.2f}"
+        )
+    limit = Params().max_nodes
+    print(f"  bnb nodes max {max(r['bnb'][4] for r in rows)}, node limit hit: {sum(r['bnb'][4] > limit for r in rows)}")
     mcs = [r["mc"] for r in rows if "mc" in r]
     if mcs:
         print(f"robustness of bnb plans ({len(mcs)} plans x {args.mc} trials, mean over plans):")
@@ -110,7 +122,7 @@ def cmd_bench(args) -> None:
 
 
 def cmd_gen(args) -> None:
-    sc = scn.generate(args.seed, n_targets=args.targets, per_target=args.per_target)
+    sc = scn.generate(args.seed, n_targets=args.targets, per_target=args.per_target, target_spread=args.spread)
     scn.save(sc, args.out)
     print(f"wrote {args.out}")
 
@@ -124,6 +136,7 @@ def main(argv: list[str] | None = None) -> None:
         p.add_argument("--seed", type=int, default=0)
         p.add_argument("--targets", type=int, default=2)
         p.add_argument("--per-target", type=int, default=3)
+        p.add_argument("--spread", type=float, default=1500.0, help="targets drawn in +-spread m")
 
     r = sub.add_parser("run", help="plan, verify, and visualize one scenario")
     scenario_args(r)
@@ -138,6 +151,9 @@ def main(argv: list[str] | None = None) -> None:
     b.add_argument("--seeds", type=int, default=200)
     b.add_argument("--start", type=int, default=0)
     b.add_argument("--jobs", type=int, default=None)
+    b.add_argument("--targets", type=int, default=2)
+    b.add_argument("--per-target", type=int, default=3)
+    b.add_argument("--spread", type=float, default=1500.0, help="targets drawn in +-spread m")
     b.add_argument("--mc", type=int, default=0, help="Monte Carlo trials per bnb plan (0 = off)")
     b.set_defaults(func=cmd_bench)
 
@@ -146,6 +162,7 @@ def main(argv: list[str] | None = None) -> None:
     g.add_argument("--seed", type=int, default=0)
     g.add_argument("--targets", type=int, default=2)
     g.add_argument("--per-target", type=int, default=3)
+    g.add_argument("--spread", type=float, default=1500.0)
     g.set_defaults(func=cmd_gen)
 
     args = ap.parse_args(argv)
