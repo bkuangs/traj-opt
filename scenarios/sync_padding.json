@@ -1,0 +1,42 @@
+{
+  "name": "sync_padding",
+  "aircraft": [
+    {
+      "id": 1,
+      "x": 5000,
+      "y": 0,
+      "z": 300,
+      "heading_deg": 180
+    },
+    {
+      "id": 2,
+      "x": -1800,
+      "y": 2000,
+      "z": 320,
+      "heading_deg": -60
+    },
+    {
+      "id": 3,
+      "x": -900,
+      "y": -900,
+      "z": 300,
+      "heading_deg": -135
+    }
+  ],
+  "targets": [
+    {
+      "id": "A",
+      "x": 0,
+      "y": 0,
+      "value": 5,
+      "aircraft": [
+        1,
+        2,
+        3
+      ]
+    }
+  ],
+  "terrain": {
+    "hills": []
+  }
+}

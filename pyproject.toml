@@ -1,0 +1,35 @@
+[project]
+name = "traj-opt"
+version = "0.1.0"
+description = "Prototype: synchronized multi-aircraft ingress with joint deconfliction"
+readme = "README.md"
+authors = [
+    { name = "bkuangs", email = "kuangbrian71@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "matplotlib>=3.11.2",
+    "numpy>=2.5.4",
+]
+
+[project.scripts]
+traj-opt = "traj_opt.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.10.9,<0.11.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.17.1",
+]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
