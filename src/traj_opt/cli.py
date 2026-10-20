@@ -7,6 +7,7 @@ import statistics
 from concurrent.futures import ProcessPoolExecutor
 
 from . import scenario as scn
+from .fuel import plan_fuel
 from .model import Params
 from .planner import build_problem, solve
 from .robust import monte_carlo
@@ -59,7 +60,7 @@ def _bench_one(seed: int, mc: int = 0, targets: int = 2, per_target: int = 3, sp
     row = {"seed": seed, "t_build": prob.stats["t_candidates_s"] + prob.stats["t_conflicts_s"]}
     for s in ("greedy", "sector_greedy", "bnb"):
         plan, rep = solve(prob, s)
-        row[s] = (plan.status, plan.cost, rep.ok, plan.extra["t_solve_s"], plan.nodes)
+        row[s] = (plan.status, plan.cost, rep.ok, plan.extra["t_solve_s"], plan.nodes, plan_fuel(sc, plan))
         if s == "bnb" and mc and plan.status == "CONFLICT_FREE":
             row["mc"] = monte_carlo(sc, plan, trials=mc)
     return row
@@ -99,6 +100,14 @@ def cmd_bench(args) -> None:
         saving = statistics.mean((r["greedy"][1] - r["bnb"][1]) / r["greedy"][1] for r in both)
         print(f"bnb cheaper than greedy      : {len(better)}/{len(both)}  mean cost reduction {100 * saving:.1f}%")
     print(f"bnb worse than greedy (bug)  : {worse}")
+    sg_both = [r for r in sg_ok if r["bnb"][0] == "CONFLICT_FREE"]
+    for s, rs in (("greedy", both), ("sector_greedy", sg_both)):
+        if rs:
+            d = [(r["bnb"][5] - r[s][5]) / r[s][5] for r in rs]
+            print(
+                f"fuel bnb vs {s:13s}: mean {100 * statistics.mean(d):+.2f}%  min {100 * min(d):+.2f}%  "
+                f"max {100 * max(d):+.2f}%  bnb uses more in {sum(x > 1e-9 for x in d)}/{len(d)}"
+            )
     print(f"verifier failures (bug)      : {bad_verify}")
     print(f"build time (shared) mean {statistics.mean(r['t_build'] for r in rows):.2f}s")
     for s in ("greedy", "sector_greedy", "bnb"):

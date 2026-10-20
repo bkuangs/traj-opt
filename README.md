@@ -105,6 +105,15 @@ Of the 62 scenarios branch and bound rescues from greedy, 61 fail because an air
 - With the old 0.5 m/s margin, the aircraft that sets `T` hits `v_max` under a headwind or a late start and arrives late. The 15% margin costs 2 fully planned scenarios and removes most arrival misses.
 - Timing padding that grows with time was tried and reverted. With schedule tracking, timing error is largest at the start (about 5.5 s p95, from the start delay) and settles to about 0.8 s within 30 s. So padding that grows over the flight is the wrong shape; it gave no benefit and was 1.7× slower to build. The fixed 1 s jitter matches the settled error.
 
+**Fuel.** `fuel.py` estimates energy up to ingress, in seconds of level flight at nominal speed. It uses parabolic drag with `v_nom` as the best-range speed, so power is `(v⁴ + v_nom⁴) / (2 v v_nom³)` × nominal. Climbs cost `m g Δh` at L/D = 10, and descents get no credit. With a common arrival time, every route flies for about `T`, so a longer route means a higher speed. Power is 0.89× nominal at 16.5 m/s and 1.8× at 28.5 m/s. Fuel is reported, not optimized.
+
+| config (plans where both solvers plan everyone) | bnb fuel vs greedy | bnb fuel vs sector_greedy |
+|---|---|---|
+| 2×3, ±1500, 200 seeds | −0.35% mean (−3.8% … +2.5%), more in 12/128 | −0.04% (−1.7% … +1.9%), more in 3/179 |
+| 3×4, ±800, 100 seeds | −0.79% mean (−2.6% … +0.2%), more in 2/17 | −0.27% (−2.6% … +0.8%), more in 4/41 |
+
+Fuel differences between solvers are under 1% on average. The cost function penalizes `|v − v_nom|` symmetrically, but fuel favours flying slower (minimum power is at 0.76 `v_nom`). So a cost that minimizes fuel would prefer the shortest feasible routes flown slowly. Climbs are usually zero (median), but they reach 29% of an aircraft's fuel when terrain forces a higher layer.
+
 **Denser airspace** (`--targets/--per-target/--spread`, 100 seeds each; targets drawn in ±spread m). Solve times are relative only: the five runs shared the CPU, so absolute times are about 6× too high. The single-run baseline above is the absolute reference.
 
 | targets × per target, spread | greedy | sector_greedy | bnb (partial) | sector_greedy cost above bnb | bnb solve mean / p95 / max | bnb node-limit hits | greedy / sector_greedy solve max |
@@ -124,6 +133,7 @@ Of the 62 scenarios branch and bound rescues from greedy, 61 fail because an air
 - `test_dubins.py`: endpoints, headings, length, curvature bound, chain continuity (random poses).
 - `test_voxels.py`: head-on, crossing, time-separated crossing, parallel tracks, vertical layers, trailing within jitter, coarse-sampling guard, terrain. Also a **no-false-negatives property test**: every random pair that loses separation in continuous time must be flagged by the voxels.
 - `test_select.py`: `bnb == brute_force` on 300 random instances; `bnb ≤ greedy` whenever greedy succeeds.
+- `test_fuel.py`: power curve minimum and nominal point; climb is charged, descent is not.
 - `test_e2e.py`: plans from the full pipeline pass the verifier; determinism; JSON round trip; sector assignment respects 45°; `bnb ≤ sector_greedy`.
 - `test_robust.py`: zero dispersion reproduces the plan; determinism; the speed margin reduces arrival misses; large errors are detected as separation loss.
 
