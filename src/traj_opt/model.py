@@ -27,6 +27,7 @@ class Params:
     ingress_radius: float = 800.0
     ingress_step_deg: float = 30.0
     ingress_per_aircraft: int = 4
+    ingress_spread: bool = False  # keep angles evenly spaced around the ring instead of the nearest
     min_sector_deg: float = 45.0  # min approach-angle difference on the same target
     ingress_min_spacing: float = 180.0  # between ingress points of different targets
     r_exempt: float = 250.0  # trajectories end here; converging inside is intended
@@ -38,6 +39,7 @@ class Params:
     alt_step: float = 40.0
     terrain_margin: float = 25.0  # cruise floor above corridor terrain + clearance (covers voxel column conservatism)
     alt_layers: int = 1  # offsets -n..n
+    loiter: bool = True
     min_bulge_extra: float = 300.0  # bulges must add at least this much length
     max_bulge_offset: float = 4000.0
     # Selection

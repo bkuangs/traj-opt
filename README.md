@@ -140,11 +140,33 @@ Fuel differences between solvers are under 1% on average. The cost function pena
 - 4 aircraft on one target are where the sector step helps most (17 → 41). It is also where the candidate set is too small: with 4 ingress angles 30° apart and a 45° minimum spacing, at most 3 aircraft fit cleanly.
 - Runtime: greedy and sector_greedy stay in milliseconds. bnb goes from milliseconds to seconds and hits the 200k node limit in up to 31% of dense scenarios. When it does, it returns the best plan found so far, which is never worse than greedy-with-drops but is no longer proven optimal. Candidate build time grows roughly linearly with the number of aircraft and stays the dominant cost at the default density.
 
+**More approach angles** (`bench --param KEY=VALUE`). In dense runs, most bnb drops (33 of 48) were proven impossible: each aircraft kept only its 4 nearest angles, so aircraft from the same side shared about a 90° arc. That arc fits only 2 aircraft ≥ 45° apart. Four variants were tried on 3×4, ±800, 100 seeds:
+
+| variant | angles that produce routes, per aircraft (mean) | greedy | sector_greedy | bnb (partial) | bnb node-limit hits |
+|---|---|---|---|---|---|
+| 4 nearest + loiter (default) | 3.73 | 17 | 41 | 76 (24) | 31 |
+| 4 spread 90° apart (`ingress_spread=true`) | 2.54 | 7 | 26 | 54 (46) | 18 |
+| 6 spread 60° apart, no loiter | 3.79 | 17 | 38 | 81 (19) | 16 |
+| **6 nearest, no loiter** (`ingress_per_aircraft=6 loiter=false`) | 5.16 | 31 | 42 | **98 (2)** | 28 |
+
+Spreading angles makes things worse. `T` is set from each aircraft's nearest angle, so far-side angles usually need a speed above the band, and no route is built for them. With 4 spread angles, a third of aircraft keep only one usable angle. More *nearby* angles is what helps. Dropping loiters (never chosen) keeps 6 angles × 3 shapes × 3 altitudes = 54 under the 64-route cap.
+
+6 nearest without loiter, on the other configs:
+
+| config | greedy | sector_greedy | bnb (partial) | node-limit hits | value planned, greedy_drops → bnb |
+|---|---|---|---|---|---|
+| 2×3, ±1500, 200 seeds | 128 → 140 | 179 → 182 | 190 → **196** (4) | 0 → 1 | 94.6% → 99.7% |
+| 3×3, ±1000 | 50 → 67 | 55 → 55 | 92 → **97** (3) | 2 → 2 | 95.7% → 99.6% |
+| 4×3, ±1000 | 39 → 61 | 31 → 29 | 86 → **96** (4) | 23 → 20 | 96.1% → 99.6% |
+
+(Arrows show default → 6 nearest.) Robustness is unchanged: arrival misses are 1.5% vs 1.4%, and separation loss is in 1 plan, as before. Candidate build time roughly doubles, and bnb has more to search. The default is unchanged so the earlier results stay reproducible.
+
 ## Tests
 
 - `test_dubins.py`: endpoints, headings, length, curvature bound, chain continuity (random poses).
 - `test_voxels.py`: head-on, crossing, time-separated crossing, parallel tracks, vertical layers, trailing within jitter, coarse-sampling guard, terrain. Also a **no-false-negatives property test**: every random pair that loses separation in continuous time must be flagged by the voxels.
 - `test_select.py`: `bnb == brute_force` on 300 random instances; `bnb ≤ greedy` whenever greedy succeeds; `greedy_drops` is feasible, equals greedy when greedy succeeds, and is never cheaper than bnb.
+- `test_candidates.py`: spread approach angles are evenly spaced and keep the nearest; the loiter switch.
 - `test_fuel.py`: power curve minimum and nominal point; climb is charged, descent is not.
 - `test_e2e.py`: plans from the full pipeline pass the verifier; determinism; JSON round trip; sector assignment respects 45°; `bnb ≤ sector_greedy`.
 - `test_robust.py`: zero dispersion reproduces the plan; determinism; the speed margin reduces arrival misses; large errors are detected as separation loss; per-aircraft delivery probabilities are consistent with the aggregates.

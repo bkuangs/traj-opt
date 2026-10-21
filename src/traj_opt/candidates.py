@@ -26,7 +26,15 @@ def ingress_options(sc: Scenario, ac: Aircraft, tgt: Target) -> list[tuple[float
         pose = (tgt.x + p.ingress_radius * math.cos(ang), tgt.y + p.ingress_radius * math.sin(ang), ang + math.pi)
         opts.append((ang, pose, shortest((ac.x, ac.y, ac.heading), pose, ac.r_min).length))
     opts.sort(key=lambda o: (o[2], o[0]))
-    return opts[: p.ingress_per_aircraft]
+    if not p.ingress_spread:
+        return opts[: p.ingress_per_aircraft]
+    # Evenly spaced around the ring, anchored at the nearest angle, each snapped to the closest unused option.
+    keep, rest = [opts[0]], opts[1:]
+    for i in range(1, p.ingress_per_aircraft):
+        want = opts[0][0] + 2 * math.pi * i / p.ingress_per_aircraft
+        j = min(range(len(rest)), key=lambda j: (abs((rest[j][0] - want + math.pi) % (2 * math.pi) - math.pi), j))
+        keep.append(rest.pop(j))
+    return sorted(keep, key=lambda o: (o[2], o[0]))
 
 
 def speed_band(sc: Scenario, ac: Aircraft) -> tuple[float, float]:
@@ -126,7 +134,7 @@ def build_candidates(sc: Scenario, ac: Aircraft, T: float) -> list[Candidate]:
                 c = _bulge(q0, q1, ac.r_min, side, pad_len, p.max_bulge_offset)
                 if c is not None:
                     geoms.append((f"bulge_{name}", c))
-                c = _loiter(q0, q1, ac.r_min, side, pad_len)
+                c = _loiter(q0, q1, ac.r_min, side, pad_len) if p.loiter else None
                 if c is not None:
                     geoms.append((f"loiter_{name}", c))
         for geom, chain in geoms:

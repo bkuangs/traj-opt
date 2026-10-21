@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import statistics
 from concurrent.futures import ProcessPoolExecutor
 
@@ -65,8 +66,21 @@ def _value(sc: scn.Scenario, plan, rob=None) -> float:
     return got / sum(t.value for t in sc.targets)
 
 
-def _bench_one(seed: int, mc: int = 0, targets: int = 2, per_target: int = 3, spread: float = 1500.0) -> dict:
-    sc = scn.generate(seed, n_targets=targets, per_target=per_target, target_spread=spread)
+def _params(overrides: list[str] | None) -> Params:
+    """Params from KEY=VALUE strings, each value parsed with the field's default type."""
+    defaults = Params()
+    kw = {}
+    for item in overrides or []:
+        key, val = item.split("=", 1)
+        typ = type(getattr(defaults, key))
+        kw[key] = val.lower() in ("1", "true", "yes") if typ is bool else typ(val)
+    return dataclasses.replace(defaults, **kw)
+
+
+def _bench_one(
+    seed: int, mc: int = 0, targets: int = 2, per_target: int = 3, spread: float = 1500.0, params: Params | None = None
+) -> dict:
+    sc = scn.generate(seed, n_targets=targets, per_target=per_target, target_spread=spread, params=params)
     prob = build_problem(sc)
     row = {"seed": seed, "t_build": prob.stats["t_candidates_s"] + prob.stats["t_conflicts_s"]}
     for s in ("greedy", "sector_greedy", "bnb"):
@@ -84,11 +98,20 @@ def _bench_one(seed: int, mc: int = 0, targets: int = 2, per_target: int = 3, sp
 
 
 def cmd_bench(args) -> None:
+    params = _params(args.param)
     with ProcessPoolExecutor(args.jobs) as ex:
         seeds = range(args.start, args.start + args.seeds)
         k = len(seeds)
         rows = list(
-            ex.map(_bench_one, seeds, [args.mc] * k, [args.targets] * k, [args.per_target] * k, [args.spread] * k)
+            ex.map(
+                _bench_one,
+                seeds,
+                [args.mc] * k,
+                [args.targets] * k,
+                [args.per_target] * k,
+                [args.spread] * k,
+                [params] * k,
+            )
         )
     n = len(rows)
     g_ok = [r for r in rows if r["greedy"][0] == "CONFLICT_FREE"]
@@ -104,7 +127,7 @@ def cmd_bench(args) -> None:
     sg_gap = [(r["sector_greedy"][1] - r["bnb"][1]) / r["bnb"][1] for r in sg_ok if r["bnb"][0] == "CONFLICT_FREE"]
     print(
         f"seeds {args.start}..{args.start + n - 1}: {args.targets} targets x {args.per_target} aircraft, "
-        f"target spread +-{args.spread:.0f} m"
+        f"target spread +-{args.spread:.0f} m" + (f", params {' '.join(args.param)}" if args.param else "")
     )
     print(f"greedy  all aircraft planned : {len(g_ok)}/{n}")
     print(
@@ -134,7 +157,7 @@ def cmd_bench(args) -> None:
             f"  {s:13s} solve ms: mean {statistics.mean(ts):8.2f}  "
             f"p95 {ts[int(0.95 * (n - 1))]:8.2f}  max {ts[-1]:8.2f}"
         )
-    limit = Params().max_nodes
+    limit = params.max_nodes
     print(f"  bnb nodes max {max(r['bnb'][4] for r in rows)}, node limit hit: {sum(r['bnb'][4] > limit for r in rows)}")
     for k, label in ((0, "planned"), (1, f"expected after MC ({args.mc} trials)")):
         if rows[0]["value"]["bnb"][k] is None:
@@ -193,6 +216,7 @@ def main(argv: list[str] | None = None) -> None:
     b.add_argument("--per-target", type=int, default=3)
     b.add_argument("--spread", type=float, default=1500.0, help="targets drawn in +-spread m")
     b.add_argument("--mc", type=int, default=0, help="Monte Carlo trials per bnb plan (0 = off)")
+    b.add_argument("--param", action="append", metavar="KEY=VALUE", help="override a Params field (repeatable)")
     b.set_defaults(func=cmd_bench)
 
     g = sub.add_parser("gen", help="write a generated scenario to JSON")
