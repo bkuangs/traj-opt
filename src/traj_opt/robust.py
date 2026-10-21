@@ -36,6 +36,8 @@ class Robustness:
     arrival_err_p95: float  # s, 95th percentile of the worst |ingress time error| per trial
     min_sep_p05: float  # 5th percentile of the worst separation ratio per trial
     pair_loss: dict[tuple[int, int], float] = field(default_factory=dict)
+    # P(aircraft arrives within arrival_tol with no terrain or separation violation), per aircraft id
+    p_deliver: dict[int, float] = field(default_factory=dict)
 
     def summary(self) -> str:
         worst = max(self.pair_loss.items(), key=lambda kv: kv[1], default=(None, 0.0))
@@ -103,7 +105,9 @@ def monte_carlo(sc: Scenario, plan: Plan, trials: int = 200, disp: Dispersions |
         xyz[:, :, i, 2] = np.interp(q, si, pts[:, 2]) + dalt[:, i]
 
     clearance = xyz[..., 2] - sc.terrain.height(xyz[..., 0], xyz[..., 1])
-    terrain_bad = np.where(active, clearance < p.terrain_clearance, False).any(axis=(0, 2))
+    terrain_bad_ac = np.where(active, clearance < p.terrain_clearance, False).any(axis=0)  # (trials, n)
+    terrain_bad = terrain_bad_ac.any(axis=1)
+    failed = terrain_bad_ac | (np.abs(t_ing - plan.T) > disp.arrival_tol)
 
     worst = np.full(trials, np.inf)
     pair_loss = {}
@@ -112,6 +116,8 @@ def monte_carlo(sc: Scenario, plan: Plan, trials: int = 200, disp: Dispersions |
         ratio = np.maximum(np.hypot(d[..., 0], d[..., 1]) / p.sep_h, np.abs(d[..., 2]) / p.sep_v)
         m = np.where(active[:, :, i] & active[:, :, j], ratio, np.inf).min(axis=0)
         worst = np.minimum(worst, m)
+        failed[:, i] |= m < 1.0
+        failed[:, j] |= m < 1.0
         pair_loss[(a, b)] = float((m < 1.0).mean())
 
     return Robustness(
@@ -122,4 +128,5 @@ def monte_carlo(sc: Scenario, plan: Plan, trials: int = 200, disp: Dispersions |
         arrival_err_p95=float(np.percentile(arrival_err, 95)),
         min_sep_p05=float(np.percentile(worst, 5)),
         pair_loss=pair_loss,
+        p_deliver={a: float(1.0 - failed[:, i].mean()) for i, (a, _) in enumerate(chosen)},
     )

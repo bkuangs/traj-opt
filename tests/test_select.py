@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from traj_opt.model import Aircraft, Candidate, Params, Scenario, Target, Terrain
-from traj_opt.select import bnb, brute_force, greedy
+from traj_opt.select import bnb, brute_force, greedy, greedy_with_drops
 
 
 def random_instance(seed, n_ac=4, max_cands=4, density=0.3):
@@ -56,3 +56,14 @@ def test_bnb_never_worse_than_greedy(seed):
         assert chosen_is_feasible(g, conflicts)
         assert b.status == "CONFLICT_FREE"
         assert b.cost <= g.cost + 1e-9
+
+
+@pytest.mark.parametrize("seed", range(100))
+def test_greedy_with_drops(seed):
+    sc, cands, conflicts = random_instance(seed, n_ac=5, density=0.3)
+    g, gd, b = (f(sc, 100.0, cands, conflicts) for f in (greedy, greedy_with_drops, bnb))
+    assert chosen_is_feasible(gd, conflicts)
+    assert set(gd.chosen) == {a.id for a in sc.aircraft}
+    assert b.cost <= gd.cost + 1e-9
+    if g.status == "CONFLICT_FREE":
+        assert gd.chosen == g.chosen and gd.status == "CONFLICT_FREE"

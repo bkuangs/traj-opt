@@ -57,7 +57,12 @@ def build_problem(sc: Scenario) -> Problem:
     return Problem(sc, T, cands, conflicts, stats)
 
 
-SOLVERS = {"greedy": select.greedy, "sector_greedy": select.sector_greedy, "bnb": select.bnb}
+SOLVERS = {
+    "greedy": select.greedy,
+    "greedy_drops": select.greedy_with_drops,
+    "sector_greedy": select.sector_greedy,
+    "bnb": select.bnb,
+}
 
 
 def solve(prob: Problem, solver: str) -> tuple[Plan, Report]:

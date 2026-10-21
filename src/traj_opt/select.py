@@ -1,6 +1,7 @@
 """Choose one candidate (or drop) per aircraft so no two chosen candidates conflict.
 
 greedy: the production approach. Fixed priority order, first conflict-free candidate, else NO_SAFE_PLAN.
+greedy_with_drops: same, but drops a stuck aircraft and continues (bnb's incumbent; a fair value baseline).
 sector_greedy: per target, jointly assign approach angles (all pairs >= min_sector apart, minimum total
         best-candidate cost), then greedy restricted to the assigned angles. A cheap fix for the dominant
         greedy failure (teammates competing for the same approach arc).
@@ -44,6 +45,25 @@ def greedy(sc: Scenario, T: float, cands: dict[int, list[Candidate]], conflicts:
         chosen[ac] = pick
         blocked |= conflicts[pick.idx]
     return Plan("greedy", T, chosen, sum(c.cost for c in chosen.values()))
+
+
+def greedy_with_drops(
+    sc: Scenario, T: float, cands: dict[int, list[Candidate]], conflicts: dict[int, set[int]]
+) -> Plan:
+    """Greedy that drops a stuck aircraft and keeps going instead of aborting."""
+    chosen: dict[int, Candidate | None] = {}
+    taken: set[int] = set()
+    cost = 0.0
+    for ac in priority_order(sc):
+        drop = drop_cost(sc, ac)
+        chosen[ac] = next((c for c in cands[ac] if c.idx not in taken and c.cost < drop), None)
+        if chosen[ac] is None:
+            cost += drop
+        else:
+            taken |= conflicts[chosen[ac].idx]
+            cost += chosen[ac].cost
+    status = "PARTIAL" if any(c is None for c in chosen.values()) else "CONFLICT_FREE"
+    return Plan("greedy_drops", T, chosen, cost, status=status)
 
 
 def assign_sectors(sc: Scenario, cands: dict[int, list[Candidate]]) -> dict[int, float] | None:
@@ -125,14 +145,8 @@ def bnb(sc: Scenario, T: float, cands: dict[int, list[Candidate]], conflicts: di
         del chosen[ac]
 
     # Incumbent: greedy-with-drops, so pruning starts immediately.
-    taken: set[int] = set()
-    incumbent: dict[int, Candidate | None] = {}
-    for ac in order:
-        incumbent[ac] = next((c for c in cands[ac] if c.idx not in taken and c.cost < drop[ac]), None)
-        if incumbent[ac] is not None:
-            taken |= conflicts[incumbent[ac].idx]
-    best["cost"] = sum(c.cost if c is not None else drop[ac] for ac, c in incumbent.items())
-    best["chosen"] = incumbent
+    incumbent = greedy_with_drops(sc, T, cands, conflicts)
+    best["cost"], best["chosen"] = incumbent.cost, incumbent.chosen
 
     dfs(list(order), {}, 0.0)
     plan = Plan("bnb", T, best["chosen"], best["cost"], nodes=nodes)

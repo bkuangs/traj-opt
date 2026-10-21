@@ -45,6 +45,7 @@ scenario ─► common ingress time T ─► candidates per aircraft ─► terr
 3. **Voxels** (`voxels.py`). Trajectories are rasterized into `(x, y, z, t)` cells (25 m × 10 m × 1 s), then inflated by `sep/2 + nav uncertainty` and `timing jitter`. Two candidates conflict when their inflated sets intersect, as in the production `SweptVolumeRasterizer`. Terrain is a conservative static layer. Same-target approach-sector conflicts and ingress-point spacing conflicts are added as extra edges. Lookups use an inverted index (sorted keys + bitmask), not all-pairs intersection.
 4. **Select** (`select.py`).
    - `greedy`: the production behaviour. Fixed priority order (target value), first-fit, `NO_SAFE_PLAN` if anyone is blocked.
+   - `greedy_drops`: greedy that drops a stuck aircraft and continues instead of aborting. It is a fairer baseline for value delivered, and it is bnb's starting plan.
    - `sector_greedy`: a cheap middle ground. For each target, pick the cheapest combination of approach angles that keeps every pair ≥ 45° apart. Then run greedy restricted to those angles.
    - `bnb`: joint optimum over one candidate per aircraft, or *drop* at cost `drop_cost × value`. Depth-first search:
      - branches on the most-constrained aircraft first, cheapest candidates first;
@@ -105,6 +106,17 @@ Of the 62 scenarios branch and bound rescues from greedy, 61 fail because an air
 - With the old 0.5 m/s margin, the aircraft that sets `T` hits `v_max` under a headwind or a late start and arrives late. The 15% margin costs 2 fully planned scenarios and removes most arrival misses.
 - Timing padding that grows with time was tried and reverted. With schedule tracking, timing error is largest at the start (about 5.5 s p95, from the start delay) and settles to about 0.8 s within 30 s. So padding that grows over the flight is the wrong shape; it gave no benefit and was 1.7× slower to build. The fixed 1 s jitter matches the settled error.
 
+**Target value delivered** (`bench --mc 200`). Each aircraft carries `value / (aircraft on its target)`. "Expected" weights each aircraft by its Monte Carlo probability of arriving within 2 s with no separation or terrain violation. The baseline is `greedy_drops`, because production greedy's abort would score 0. Percentages are of the total value available per scenario, averaged over scenarios.
+
+| config | greedy_drops planned / expected | bnb planned / expected | bnb gain | bnb more / less (expected) |
+|---|---|---|---|---|
+| 2×3, ±1500, 200 seeds | 92.97% / 92.79% | 99.32% / 99.13% | +6.3 pts (max +54) | 77 / 8 |
+| 3×4, ±800, 100 seeds | 88.62% / 88.49% | 98.05% / 97.92% | +9.4 pts (max +36) | 82 / 3 |
+
+- Nearly all the gain comes from planning. In-flight losses cost both solvers only about 0.15 points.
+- The largest gains (+54 points) are cascades: once greedy commits early, it strands several aircraft, not just one.
+- Where bnb is lower on expected value, it is by at most 0.25 points. These are scenarios where both planned the same aircraft and bnb's routes were slightly less robust. The cost function does not include robustness.
+
 **Fuel.** `fuel.py` estimates energy up to ingress, in seconds of level flight at nominal speed. It uses parabolic drag with `v_nom` as the best-range speed, so power is `(v⁴ + v_nom⁴) / (2 v v_nom³)` × nominal. Climbs cost `m g Δh` at L/D = 10, and descents get no credit. With a common arrival time, every route flies for about `T`, so a longer route means a higher speed. Power is 0.89× nominal at 16.5 m/s and 1.8× at 28.5 m/s. Fuel is reported, not optimized.
 
 | config (plans where both solvers plan everyone) | bnb fuel vs greedy | bnb fuel vs sector_greedy |
@@ -132,10 +144,10 @@ Fuel differences between solvers are under 1% on average. The cost function pena
 
 - `test_dubins.py`: endpoints, headings, length, curvature bound, chain continuity (random poses).
 - `test_voxels.py`: head-on, crossing, time-separated crossing, parallel tracks, vertical layers, trailing within jitter, coarse-sampling guard, terrain. Also a **no-false-negatives property test**: every random pair that loses separation in continuous time must be flagged by the voxels.
-- `test_select.py`: `bnb == brute_force` on 300 random instances; `bnb ≤ greedy` whenever greedy succeeds.
+- `test_select.py`: `bnb == brute_force` on 300 random instances; `bnb ≤ greedy` whenever greedy succeeds; `greedy_drops` is feasible, equals greedy when greedy succeeds, and is never cheaper than bnb.
 - `test_fuel.py`: power curve minimum and nominal point; climb is charged, descent is not.
 - `test_e2e.py`: plans from the full pipeline pass the verifier; determinism; JSON round trip; sector assignment respects 45°; `bnb ≤ sector_greedy`.
-- `test_robust.py`: zero dispersion reproduces the plan; determinism; the speed margin reduces arrival misses; large errors are detected as separation loss.
+- `test_robust.py`: zero dispersion reproduces the plan; determinism; the speed margin reduces arrival misses; large errors are detected as separation loss; per-aircraft delivery probabilities are consistent with the aggregates.
 
 ## Deliberate simplifications
 

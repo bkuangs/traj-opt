@@ -54,6 +54,17 @@ def cmd_run(args) -> None:
             fig.savefig(args.png.replace(".png", f"{suffix}.png"), dpi=110)
 
 
+def _value(sc: scn.Scenario, plan, rob=None) -> float:
+    """Fraction of total target value delivered. Each aircraft carries value / (aircraft on its target);
+    with a Monte Carlo result, weighted by that aircraft's delivery probability."""
+    got = 0.0
+    for a, c in (plan.chosen or {}).items():
+        if c is not None:
+            tgt = sc.target_of(a)
+            got += tgt.value / len(tgt.aircraft) * (rob.p_deliver[a] if rob else 1.0)
+    return got / sum(t.value for t in sc.targets)
+
+
 def _bench_one(seed: int, mc: int = 0, targets: int = 2, per_target: int = 3, spread: float = 1500.0) -> dict:
     sc = scn.generate(seed, n_targets=targets, per_target=per_target, target_spread=spread)
     prob = build_problem(sc)
@@ -63,6 +74,12 @@ def _bench_one(seed: int, mc: int = 0, targets: int = 2, per_target: int = 3, sp
         row[s] = (plan.status, plan.cost, rep.ok, plan.extra["t_solve_s"], plan.nodes, plan_fuel(sc, plan))
         if s == "bnb" and mc and plan.status == "CONFLICT_FREE":
             row["mc"] = monte_carlo(sc, plan, trials=mc)
+    row["value"] = {}
+    for s in ("greedy_drops", "bnb"):
+        plan, rep = solve(prob, s)
+        row.setdefault("verify_extra", []).append((s, rep.ok))
+        rob = monte_carlo(sc, plan, trials=mc) if mc else None
+        row["value"][s] = (_value(sc, plan), _value(sc, plan, rob) if rob else None)
     return row
 
 
@@ -82,6 +99,7 @@ def cmd_bench(args) -> None:
     better = [r for r in both if r["bnb"][1] < r["greedy"][1] - 1e-9]
     worse = [r["seed"] for r in both if r["bnb"][1] > r["greedy"][1] + 1e-9]
     bad_verify = [(r["seed"], s) for r in rows for s in ("greedy", "sector_greedy", "bnb") if not r[s][2]]
+    bad_verify += [(r["seed"], s) for r in rows for s, ok in r["verify_extra"] if not ok]
     sg_ok = [r for r in rows if r["sector_greedy"][0] == "CONFLICT_FREE"]
     sg_gap = [(r["sector_greedy"][1] - r["bnb"][1]) / r["bnb"][1] for r in sg_ok if r["bnb"][0] == "CONFLICT_FREE"]
     print(
@@ -118,6 +136,17 @@ def cmd_bench(args) -> None:
         )
     limit = Params().max_nodes
     print(f"  bnb nodes max {max(r['bnb'][4] for r in rows)}, node limit hit: {sum(r['bnb'][4] > limit for r in rows)}")
+    for k, label in ((0, "planned"), (1, f"expected after MC ({args.mc} trials)")):
+        if rows[0]["value"]["bnb"][k] is None:
+            continue
+        g = [r["value"]["greedy_drops"][k] for r in rows]
+        b = [r["value"]["bnb"][k] for r in rows]
+        d = [y - x for x, y in zip(g, b, strict=True)]
+        print(
+            f"target value {label}: greedy_drops {100 * statistics.mean(g):.2f}%  bnb {100 * statistics.mean(b):.2f}%  "
+            f"diff {100 * statistics.mean(d):+.2f} pts (min {100 * min(d):+.2f}, max {100 * max(d):+.2f}); "
+            f"bnb more in {sum(x > 1e-9 for x in d)}, less in {sum(x < -1e-9 for x in d)}"
+        )
     mcs = [r["mc"] for r in rows if "mc" in r]
     if mcs:
         print(f"robustness of bnb plans ({len(mcs)} plans x {args.mc} trials, mean over plans):")
