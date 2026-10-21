@@ -40,8 +40,11 @@ class Params:
     terrain_margin: float = 25.0  # cruise floor above corridor terrain + clearance (covers voxel column conservatism)
     alt_layers: int = 1  # offsets -n..n
     loiter: bool = True
+    zigzag: bool = False  # loiter + zigzag together exceed the 64-candidate cap with 4 ingress options
+    zigzag_spacing: float = 1000.0  # m along the chord between zigzag peaks
     min_bulge_extra: float = 300.0  # bulges must add at least this much length
     max_bulge_offset: float = 4000.0
+    footprint_weight: float = 0.0  # cost per km of max sideways offset from the start-to-ingress chord
     # Selection
     drop_cost: float = 1e4
     max_nodes: int = 200_000
@@ -133,6 +136,7 @@ class Candidate:
     traj: Trajectory
     cost: float = 0.0
     idx: int = -1  # global index, set by the planner
+    lateral: float = 0.0  # m, max sideways offset of the track from the start-to-ingress chord
 
     @property
     def label(self) -> str:

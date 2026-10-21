@@ -29,3 +29,31 @@ def test_loiter_switch():
     T = common_ingress_time(sc)
     geoms = {c.geometry for ac in sc.aircraft for c in build_candidates(sc, ac, T)}
     assert geoms and not any(g.startswith("loiter") for g in geoms)
+
+
+def test_zigzag_hits_length_and_is_narrower_than_bulge():
+    sc = _sc(loiter=False, zigzag=True)
+    T = common_ingress_time(sc)
+    n = 0
+    for ac in sc.aircraft:
+        cs = [c for c in build_candidates(sc, ac, T) if c.alt_offset == 0]
+        for z in (c for c in cs if c.geometry.startswith("zigzag")):
+            b = [c for c in cs if c.geometry.startswith("bulge") and c.ingress_angle == z.ingress_angle]
+            assert abs(z.speed * T - z.length) < 1e-6
+            if b:
+                assert abs(b[0].length - z.length) < 1.0
+                assert z.lateral < min(c.lateral for c in b)
+                n += 1
+    assert n > 0
+
+
+@pytest.mark.parametrize("seed", range(10))
+def test_zigzag_plans_verify(seed):
+    from traj_opt.planner import build_problem, solve
+
+    sc = scenario.generate(seed)
+    sc = dataclasses.replace(sc, params=dataclasses.replace(sc.params, loiter=False, zigzag=True, footprint_weight=2.0))
+    prob = build_problem(sc)
+    for s in ("greedy", "bnb"):
+        plan, rep = solve(prob, s)
+        assert rep.ok, rep.violations

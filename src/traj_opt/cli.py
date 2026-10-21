@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import collections
 import dataclasses
 import statistics
 from concurrent.futures import ProcessPoolExecutor
 
 from . import scenario as scn
+from . import voxels
 from .fuel import plan_fuel
 from .model import Params
 from .planner import build_problem, solve
@@ -16,8 +18,15 @@ from .robust import monte_carlo
 
 def _load(args) -> scn.Scenario:
     if args.scenario:
-        return scn.load(args.scenario)
-    return scn.generate(args.seed, n_targets=args.targets, per_target=args.per_target, target_spread=args.spread)
+        sc = scn.load(args.scenario)
+        return dataclasses.replace(sc, params=_params(args.param, sc.params))
+    return scn.generate(
+        args.seed,
+        n_targets=args.targets,
+        per_target=args.per_target,
+        target_spread=args.spread,
+        params=_params(args.param),
+    )
 
 
 def _summary(prob, plan, rep) -> str:
@@ -66,9 +75,9 @@ def _value(sc: scn.Scenario, plan, rob=None) -> float:
     return got / sum(t.value for t in sc.targets)
 
 
-def _params(overrides: list[str] | None) -> Params:
-    """Params from KEY=VALUE strings, each value parsed with the field's default type."""
-    defaults = Params()
+def _params(overrides: list[str] | None, base: Params | None = None) -> Params:
+    """`base` (default Params()) with KEY=VALUE overrides, each value parsed with the field's type."""
+    defaults = base or Params()
     kw = {}
     for item in overrides or []:
         key, val = item.split("=", 1)
@@ -88,6 +97,13 @@ def _bench_one(
         row[s] = (plan.status, plan.cost, rep.ok, plan.extra["t_solve_s"], plan.nodes, plan_fuel(sc, plan))
         if s == "bnb" and mc and plan.status == "CONFLICT_FREE":
             row["mc"] = monte_carlo(sc, plan, trials=mc)
+        if s == "bnb":
+            row["routes"] = [
+                (c.geometry, c.lateral, len(voxels.inflated_keys(c.traj.t, c.traj.xyz, sc.params)))
+                for c in plan.chosen.values()
+                if c is not None
+            ]
+    row["conflict_pairs"] = prob.stats["conflict_pairs"]
     row["value"] = {}
     for s in ("greedy_drops", "bnb"):
         plan, rep = solve(prob, s)
@@ -157,6 +173,18 @@ def cmd_bench(args) -> None:
             f"  {s:13s} solve ms: mean {statistics.mean(ts):8.2f}  "
             f"p95 {ts[int(0.95 * (n - 1))]:8.2f}  max {ts[-1]:8.2f}"
         )
+    routes = [x for r in rows for x in r["routes"]]
+    shapes = collections.Counter(g.split("_")[0] for g, _, _ in routes)
+    lat = sorted(x for _, x, _ in routes)
+    print(
+        f"bnb routes: {dict(shapes)}  sideways offset m: median {lat[len(lat) // 2]:.0f} "
+        f"p95 {lat[int(0.95 * (len(lat) - 1))]:.0f} max {lat[-1]:.0f}  "
+        f"cells/route mean {statistics.mean(c for _, _, c in routes):.0f}  "
+        f"conflict pairs/scenario mean {statistics.mean(r['conflict_pairs'] for r in rows):.0f}"
+    )
+    for shape in sorted(shapes):
+        lx = sorted(x for g, x, _ in routes if g.startswith(shape))
+        print(f"  {shape:7s} offset median {lx[len(lx) // 2]:5.0f} m  max {lx[-1]:5.0f} m")
     limit = params.max_nodes
     print(f"  bnb nodes max {max(r['bnb'][4] for r in rows)}, node limit hit: {sum(r['bnb'][4] > limit for r in rows)}")
     for k, label in ((0, "planned"), (1, f"expected after MC ({args.mc} trials)")):
@@ -198,6 +226,7 @@ def main(argv: list[str] | None = None) -> None:
         p.add_argument("--targets", type=int, default=2)
         p.add_argument("--per-target", type=int, default=3)
         p.add_argument("--spread", type=float, default=1500.0, help="targets drawn in +-spread m")
+        p.add_argument("--param", action="append", metavar="KEY=VALUE", help="override a Params field (repeatable)")
 
     r = sub.add_parser("run", help="plan, verify, and visualize one scenario")
     scenario_args(r)

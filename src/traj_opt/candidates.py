@@ -14,7 +14,15 @@ import numpy as np
 from .dubins import Chain, DubinsPath, shortest
 from .model import Aircraft, Candidate, Scenario, Target, Trajectory
 
-GEOMETRY_PENALTY = {"direct": 0.0, "bulge_L": 1.0, "bulge_R": 1.0, "loiter_L": 2.0, "loiter_R": 2.0}
+GEOMETRY_PENALTY = {
+    "direct": 0.0,
+    "bulge_L": 1.0,
+    "bulge_R": 1.0,
+    "zigzag_L": 1.0,
+    "zigzag_R": 1.0,
+    "loiter_L": 2.0,
+    "loiter_R": 2.0,
+}
 
 
 def ingress_options(sc: Scenario, ac: Aircraft, tgt: Target) -> list[tuple[float, tuple[float, float, float], float]]:
@@ -50,15 +58,19 @@ def common_ingress_time(sc: Scenario) -> float:
     return max(earliest) + sc.params.schedule_margin
 
 
-def _bulge(q0, q1, r: float, side: int, length: float, max_offset: float) -> Chain | None:
-    """Dubins through a waypoint offset sideways from the chord midpoint, sized to hit `length`."""
-    mx, my = (q0[0] + q1[0]) / 2, (q0[1] + q1[1]) / 2
+def _offset_chain(q0, q1, r: float, waypoints: list[tuple[float, int]], length: float, max_offset: float):
+    """Dubins through waypoints at chord fractions, each offset sideways by sign * offset (heading along
+    the chord); the common offset is sized by grid search + bisection to hit `length`."""
     chord = math.atan2(q1[1] - q0[1], q1[0] - q0[0])
-    nx, ny = -math.sin(chord) * side, math.cos(chord) * side
+    nx, ny = -math.sin(chord), math.cos(chord)
 
     def chain(off: float) -> Chain:
-        w = (mx + off * nx, my + off * ny, chord)
-        return Chain([shortest(q0, w, r), shortest(w, q1, r)])
+        pts = [tuple(q0)]
+        for f, sign in waypoints:
+            x, y = q0[0] + f * (q1[0] - q0[0]), q0[1] + f * (q1[1] - q0[1])
+            pts.append((x + sign * off * nx, y + sign * off * ny, chord))
+        pts.append(tuple(q1))
+        return Chain([shortest(a, b, r) for a, b in zip(pts, pts[1:], strict=False)])
 
     grid = np.linspace(0.0, max_offset, 41)
     lens = [chain(o).length for o in grid]
@@ -71,6 +83,26 @@ def _bulge(q0, q1, r: float, side: int, length: float, max_offset: float) -> Cha
             c = chain(hi)
             return c if abs(c.length - length) < 1.0 else None
     return None
+
+
+def _bulge(q0, q1, r: float, side: int, length: float, max_offset: float) -> Chain | None:
+    """One waypoint offset sideways from the chord midpoint."""
+    return _offset_chain(q0, q1, r, [(0.5, side)], length, max_offset)
+
+
+def _zigzag(q0, q1, r: float, side: int, length: float, max_offset: float, spacing: float) -> Chain | None:
+    """Waypoints alternating left/right about every `spacing` m along the chord (turn-radius-correct weave)."""
+    n = max(2, round(math.dist(q0[:2], q1[:2]) / spacing))
+    return _offset_chain(
+        q0, q1, r, [(i / (n + 1), side * (-1) ** (i - 1)) for i in range(1, n + 1)], length, max_offset
+    )
+
+
+def _lateral(chain: Chain, q0, q1, step: float) -> float:
+    """Largest sideways distance of the horizontal track from the start-to-ingress chord."""
+    xy = chain.sample(np.arange(0.0, chain.length, step))[:, :2]
+    chord = math.atan2(q1[1] - q0[1], q1[0] - q0[0])
+    return float(np.abs(-(xy[:, 0] - q0[0]) * math.sin(chord) + (xy[:, 1] - q0[1]) * math.cos(chord)).max())
 
 
 def _loiter(q0, q1, r_min: float, side: int, length: float) -> Chain | None:
@@ -137,8 +169,12 @@ def build_candidates(sc: Scenario, ac: Aircraft, T: float) -> list[Candidate]:
                 c = _loiter(q0, q1, ac.r_min, side, pad_len) if p.loiter else None
                 if c is not None:
                     geoms.append((f"loiter_{name}", c))
+                c = _zigzag(q0, q1, ac.r_min, side, pad_len, p.max_bulge_offset, p.zigzag_spacing) if p.zigzag else None
+                if c is not None:
+                    geoms.append((f"zigzag_{name}", c))
         for geom, chain in geoms:
             speed = chain.length / T
+            lateral = _lateral(chain, q0, q1, p.dx)
             z_base = max(ac.z, _terrain_floor(sc, chain, q1) + p.terrain_margin)
             for layer in range(-p.alt_layers, p.alt_layers + 1):
                 z1 = z_base + layer * p.alt_step
@@ -151,9 +187,12 @@ def build_candidates(sc: Scenario, ac: Aircraft, T: float) -> list[Candidate]:
                     + 0.3 * rank
                     + (chain.length - best_direct) / 1000.0
                     + 2.0 * abs(speed - ac.v_nom) / ac.v_nom
+                    + p.footprint_weight * lateral / 1000.0
                 )
-                out.append(Candidate(ac.id, tgt.id, ang, (q1[0], q1[1]), geom, layer, speed, chain.length, traj, cost))
+                c = Candidate(ac.id, tgt.id, ang, (q1[0], q1[1]), geom, layer, speed, chain.length, traj, cost)
+                c.lateral = lateral
+                out.append(c)
     out.sort(key=lambda c: (c.cost, c.label))
     if len(out) > 64:
-        raise ValueError("at most 64 candidates per aircraft (bitmask conflict index)")
+        raise ValueError("at most 64 candidates per aircraft (bitmask conflict index); disable loiter or zigzag")
     return out

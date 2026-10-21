@@ -39,6 +39,7 @@ scenario ─► common ingress time T ─► candidates per aircraft ─► terr
      - `direct` Dubins, when it fits the speed band.
      - `bulge_L/R`: Dubins through a lateral waypoint. The offset is bisected so the length gives nominal speed. This is the turn-radius-aware replacement for the triangle-wave zigzag.
      - `loiter_L/R`: whole orbits, then Dubins.
+     - `zigzag_L/R` (opt-in, `zigzag=true loiter=false`): waypoints alternate left and right about every 1 km along the chord, joined by Dubins paths. The common offset is bisected to the exact length, like the bulge. Unlike production's `ZigzagNode`, it respects the turn radius, so it does not cut corners and arrive early.
    - **altitude layer**: −1, 0, or +1 × 40 m above a terrain-aware cruise floor `max(z_start, max terrain along track + clearance + margin)`. Climbs are limited to 0.8 × the climb rate.
 
    Every candidate also has a straight terminal leg from the ingress point to `r_exempt`; convergence closer in than that is intended. Cost is value-weighted: geometry penalty + layer + ingress rank + extra length + deviation from nominal speed.
@@ -161,12 +162,27 @@ Spreading angles makes things worse. `T` is set from each aircraft's nearest ang
 
 (Arrows show default → 6 nearest.) Robustness is unchanged: arrival misses are 1.5% vs 1.4%, and separation loss is in 1 plan, as before. Build time and bnb search effort were not measured cleanly here (runs shared the CPU). The default is unchanged so the earlier results stay reproducible.
 
+**Zigzag and a sideways-footprint cost** (`zigzag=true loiter=false footprint_weight=w`). `footprint_weight` adds `w × value × (max sideways offset from the start-to-ingress chord, km)` to each route's cost. 2×3, 200 seeds, 100 Monte Carlo trials per plan:
+
+| variant | bnb routes chosen (direct / bulge / zigzag) | sideways offset p95 / max | bnb all planned | node-limit hits | conflict pairs per scenario | P(arrival miss) |
+|---|---|---|---|---|---|---|
+| default (bulge + loiter) | 981 / 209 / – | 1310 / 1522 m | 190 | 0 | 1273 | 1.4% |
+| zigzag, w = 0 | 981 / 183 / 26 | 1303 / 1522 m | 190 | 3 | 2708 | 1.4% |
+| zigzag, w = 0.5 | 986 / 3 / 201 | 548 / 1402 m | 190 | 2 | 2708 | 1.5% |
+| zigzag, w = 1 | 990 / 0 / 200 | 533 / 727 m | 190 | 2 | 2708 | 1.5% |
+| zigzag, w = 2 | 994 / 0 / 196 | 447 / 727 m | 190 | 2 | 2708 | 1.5% |
+
+- About 83% of chosen routes are direct. The footprint question only affects routes that must absorb time.
+- With w = 0, bulge and zigzag of the same length cost the same, so bulge usually wins the tie. With any footprint weight, zigzag replaces bulge. The worst sideways offset halves (1.5 km → 0.73 km) with no change in planning success, value, fuel (same length) or replayed robustness.
+- The price is airspace: zigzags sweep a band back and forth and conflict with twice as many other routes. At dense 3×4 with w = 1, bnb plans everyone in 72/100 instead of 76, and hits the node limit in 46 instead of 31.
+- The Monte Carlo replay models turns as perfect, so it under-penalizes zigzag's extra turns. Real tracking error from banking is untested.
+
 ## Tests
 
 - `test_dubins.py`: endpoints, headings, length, curvature bound, chain continuity (random poses).
 - `test_voxels.py`: head-on, crossing, time-separated crossing, parallel tracks, vertical layers, trailing within jitter, coarse-sampling guard, terrain. Also a **no-false-negatives property test**: every random pair that loses separation in continuous time must be flagged by the voxels.
 - `test_select.py`: `bnb == brute_force` on 300 random instances; `bnb ≤ greedy` whenever greedy succeeds; `greedy_drops` is feasible, equals greedy when greedy succeeds, and is never cheaper than bnb.
-- `test_candidates.py`: spread approach angles are evenly spaced and keep the nearest; the loiter switch.
+- `test_candidates.py`: spread approach angles are evenly spaced and keep the nearest; the loiter switch; zigzag hits the bulge's length with a smaller sideways offset; zigzag plans pass the verifier (turn radius included).
 - `test_fuel.py`: power curve minimum and nominal point; climb is charged, descent is not.
 - `test_e2e.py`: plans from the full pipeline pass the verifier; determinism; JSON round trip; sector assignment respects 45°; `bnb ≤ sector_greedy`.
 - `test_robust.py`: zero dispersion reproduces the plan; determinism; the speed margin reduces arrival misses; large errors are detected as separation loss; per-aircraft delivery probabilities are consistent with the aggregates.
