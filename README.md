@@ -115,7 +115,7 @@ Of the 62 scenarios branch and bound rescues from greedy, 61 fail because an air
 
 - Nearly all the gain comes from planning. In-flight losses cost both solvers only about 0.15 points.
 - The largest gains (+54 points) are cascades: once greedy commits early, it strands several aircraft, not just one.
-- Where bnb is lower on expected value, it is by at most 0.25 points. These are scenarios where both planned the same aircraft and bnb's routes were slightly less robust. The cost function does not include robustness.
+- Where bnb is lower on expected value, it is by at most 0.25 points: its routes were slightly less robust in replay. Planned value was never lower; the cost function does not include robustness.
 
 **Fuel.** `fuel.py` estimates energy up to ingress, in seconds of level flight at nominal speed. It uses parabolic drag with `v_nom` as the best-range speed, so power is `(v⁴ + v_nom⁴) / (2 v v_nom³)` × nominal. Climbs cost `m g Δh` at L/D = 10, and descents get no credit. With a common arrival time, every route flies for about `T`, so a longer route means a higher speed. Power is 0.89× nominal at 16.5 m/s and 1.8× at 28.5 m/s. Fuel is reported, not optimized.
 
