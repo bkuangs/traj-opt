@@ -159,7 +159,7 @@ Spreading angles makes things worse. `T` is set from each aircraft's nearest ang
 | 3×3, ±1000 | 50 → 67 | 55 → 55 | 92 → **97** (3) | 2 → 2 | 95.7% → 99.6% |
 | 4×3, ±1000 | 39 → 61 | 31 → 29 | 86 → **96** (4) | 23 → 20 | 96.1% → 99.6% |
 
-(Arrows show default → 6 nearest.) Robustness is unchanged: arrival misses are 1.5% vs 1.4%, and separation loss is in 1 plan, as before. There are about 40% more routes, so build time grows (not measured cleanly; these runs shared the CPU) and bnb has more to search. The default is unchanged so the earlier results stay reproducible.
+(Arrows show default → 6 nearest.) Robustness is unchanged: arrival misses are 1.5% vs 1.4%, and separation loss is in 1 plan, as before. Build time and bnb search effort were not measured cleanly here (runs shared the CPU). The default is unchanged so the earlier results stay reproducible.
 
 ## Tests
 
