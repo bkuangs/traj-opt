@@ -39,6 +39,7 @@ class Params:
     alt_step: float = 40.0
     terrain_margin: float = 25.0  # cruise floor above corridor terrain + clearance (covers voxel column conservatism)
     alt_layers: int = 1  # offsets -n..n
+    alt_bands: bool = False  # 2n+1 shared absolute bands (alt_step apart) instead of per-aircraft offsets
     loiter: bool = True
     zigzag: bool = False  # loiter + zigzag together exceed the 64-candidate cap with 4 ingress options
     zigzag_spacing: float = 1000.0  # m along the chord between zigzag peaks

@@ -67,3 +67,23 @@ def test_greedy_with_drops(seed):
     assert b.cost <= gd.cost + 1e-9
     if g.status == "CONFLICT_FREE":
         assert gd.chosen == g.chosen and gd.status == "CONFLICT_FREE"
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_rules_plans_verify_and_fallback_never_loses(seed):
+    from traj_opt import scenario
+    from traj_opt.planner import build_problem, solve
+
+    prob = build_problem(scenario.generate(seed))
+    r, rep = solve(prob, "rules")
+    if r.status == "CONFLICT_FREE":
+        assert rep.ok
+        by_target = {}
+        for a, c in r.chosen.items():
+            by_target.setdefault(prob.sc.target_of(a).id, set()).add(c.alt_offset)
+        assert all(len(v) == 1 for v in by_target.values())
+        assert len(set.union(*by_target.values())) == len(by_target)
+    rb, rep_b = solve(prob, "rules_bnb")
+    b, _ = solve(prob, "bnb")
+    assert rep_b.ok
+    assert (rb.status == "CONFLICT_FREE") >= (b.status == "CONFLICT_FREE")

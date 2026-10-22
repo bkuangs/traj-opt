@@ -16,6 +16,8 @@ uv run traj-opt run scenarios/crossing.json --gif out.gif --no-show
 uv run traj-opt bench --seeds 200 --mc 100                         # greedy vs bnb + Monte Carlo robustness
 uv run traj-opt bench --seeds 100 --targets 3 --per-target 4 --spread 800  # denser airspace
 uv run traj-opt gen my.json --seed 3                               # write a scenario to edit by hand
+uv run traj-opt assess --trials 600                                # judge against requirements.toml (PASS/FAIL)
+uv run traj-opt sweep --trials 300                                 # which error term matters most
 uv run pytest
 ```
 
@@ -177,6 +179,29 @@ Spreading angles makes things worse. `T` is set from each aircraft's nearest ang
 - The price is airspace: zigzags sweep a band back and forth and conflict with twice as many other routes. At dense 3×4 with w = 1, bnb plans everyone in 72/100 instead of 76, and hits the node limit in 46 instead of 31.
 - The Monte Carlo replay models turns as perfect, so it under-penalizes zigzag's extra turns. Real tracking error from banking is untested.
 
+## Judging against requirements (`traj-opt assess`, `traj-opt sweep`)
+
+Every number the planner is judged against (separation, arrival window, error σ's, risk budgets) lives in `requirements.toml`, each tagged with a `source`. **All are `placeholder` today**, so results below say "meets the budget if the real numbers are this good", never "is this safe". See `docs/PLAN.md`.
+
+`assess` plans N seeds, replays each plan with Monte Carlo trials, pools them, and prints PASS/FAIL per budget line with a 95% upper confidence bound. `--is-scale 1.3` turns on importance sampling (cross-track and altitude widened, results reweighted); against 40k brute-force trials it gave the same P(LoS) with about 5× fewer trials. `sweep` scales each error term ×0.5…×4 one at a time.
+
+Baseline (2×3, 50 seeds × 600 trials, placeholders):
+
+| | rules | rules_bnb | bnb | budget |
+|---|---|---|---|---|
+| plans found | 86%¹ | 94% | 94% | ≥ 95% |
+| P(LoS) upper bound | 0 losses in ~28k trials → ≤ 1.1e-4 | same | same | ≤ 1e-4 (needs ~30k trials) |
+| P(arrival miss) | | ~3% | ~3% | ≤ 1% |
+
+¹ with `--param alt_bands=true --param alt_step=60`. `rules` = one shared altitude band per target, approach sectors, no search; `rules_bnb` falls back to bnb when rules fail (7/50 at 2×3, 17/50 at 3×4).
+
+Findings:
+
+- **Altitude error between aircraft dominates separation risk.** alt σ 10 m → 2e-3, 20 m → 1e-2. Band spacing must be ≥ sep_v + 3·√2·σ_alt (≈ 51 m at σ = 5 m); 40 m bands don't separate, 60 m do. Cross-track error barely matters until ×4.
+- **Wind and gusts dominate arrival misses.** A P-only speed loop leaves a steady error of wind/gain. Adding the integral term (`--err gain_i=0.0025`) halves misses (3.1% → 1.8%); also raising `speed_margin` 0.15 → 0.25 brings them to **0.01%** (p99 1.1 s) with no loss of plans found.
+- Most misses become predictable only ~10 s before arrival, so an in-flight repair can't save many; speed authority must be planned in.
+- Data to request first: (1) altitude error between aircraft, (2) wind/gusts, (3) start delay.
+
 ## Tests
 
 - `test_dubins.py`: endpoints, headings, length, curvature bound, chain continuity (random poses).
@@ -185,7 +210,9 @@ Spreading angles makes things worse. `T` is set from each aircraft's nearest ang
 - `test_candidates.py`: spread approach angles are evenly spaced and keep the nearest; the loiter switch; zigzag hits the bulge's length with a smaller sideways offset; zigzag plans pass the verifier (turn radius included).
 - `test_fuel.py`: power curve minimum and nominal point; climb is charged, descent is not.
 - `test_e2e.py`: plans from the full pipeline pass the verifier; determinism; JSON round trip; sector assignment respects 45°; `bnb ≤ sector_greedy`.
-- `test_robust.py`: zero dispersion reproduces the plan; determinism; the speed margin reduces arrival misses; large errors are detected as separation loss; per-aircraft delivery probabilities are consistent with the aggregates.
+- `test_robust.py`: zero dispersion reproduces the plan; determinism; the speed margin reduces arrival misses; large errors are detected as separation loss; per-aircraft delivery probabilities are consistent with the aggregates; new error terms (gusts, drift, turn overshoot, shared altimeter bias) are off by default and act as intended; the warning metric; importance sampling is unbiased; the integral term removes the wind offset.
+- `test_requirements.py`: `requirements.toml` loads and routes keys; bad entries are rejected; Clopper-Pearson bound checks.
+- `test_cli.py`: `assess` and `sweep` smoke tests.
 
 ## Deliberate simplifications
 

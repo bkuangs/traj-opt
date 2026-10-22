@@ -13,6 +13,22 @@ The goal is a planner whose safety and timing claims rest on measured data and e
 | In flight | speed loop exists only inside the Monte Carlo replay | speed loop, single-aircraft repair, lost-link hold |
 | Validation | Python replay only | Python replay → SITL → hardware-in-the-loop → flight test, with predicted vs actual compared at each stage |
 
+## Status (branch `plan/professional-gap`)
+
+| step | status |
+|---|---|
+| 1 requirements file | done: `requirements.toml`, `requirements.py` |
+| 2 metrics | done: `traj-opt assess` (Clopper-Pearson bound, p95/p99, plans found, planning p99) |
+| 3 error model | done: gusts, cross-track drift, turn overshoot, shared altimeter bias (all off by default in `Dispersions`) |
+| 4 sweep | done: `traj-opt sweep`; ranking below |
+| 5 rare events | done: importance sampling on cross-track and altitude; ≈5× fewer trials, matches brute force |
+| 6 rules planner | done: `rules`, `rules_bnb`, `alt_bands`; rules alone plans 86% (2×3) / 66% (3×4), so bnb stays as fallback |
+| 7 in-flight logic | partial: PI speed loop and "repair needed" warning. Repair ladder and lost-link deferred: warnings come ~10 s before arrival, and the replay has no datalink model |
+| 8 SITL | not started |
+| 9, 10 | need real data / aircraft |
+
+Results are in the README section "Judging against requirements".
+
 ## Steps
 
 Each step lists what it delivers and whether placeholder numbers are enough.
@@ -85,13 +101,14 @@ What placeholders **cannot** give:
 
 ## Real data to request, in likely priority order
 
-Step 4 will confirm the order.
+Reordered by the step 4 sweep.
 
-1. Flight logs of the aircraft holding speed and following curved paths: cross-track and speed-tracking error.
-2. Altitude error between aircraft flying side by side (baro vs GPS).
-3. Wind and gust statistics for the operating area.
-4. Command-to-response latency, and datalink latency and loss.
-5. Measured speed envelope and turn radius at operating weight.
+1. Altitude error between aircraft flying side by side (baro vs GPS). Dominates separation risk.
+2. Wind and gust statistics for the operating area. Dominates arrival misses.
+3. Start-time spread at launch, and flight logs of speed tracking.
+4. Cross-track error on straight and curved legs (mattered least).
+5. Command-to-response latency, and datalink latency and loss.
+6. Measured speed envelope and turn radius at operating weight.
 
 ## Order of work
 

@@ -5,8 +5,11 @@ from __future__ import annotations
 import argparse
 import collections
 import dataclasses
+import math
 import statistics
 from concurrent.futures import ProcessPoolExecutor
+
+import numpy as np
 
 from . import scenario as scn
 from . import voxels
@@ -210,6 +213,126 @@ def cmd_bench(args) -> None:
         )
 
 
+def _req(args):
+    from .requirements import load
+
+    req = load(args.req)
+    req = dataclasses.replace(req, params=_params(args.param, req.params))  # command line wins over the file
+    disp = dataclasses.replace(req.disp, **{k: float(v) for k, v in (e.split("=", 1) for e in args.err or [])})
+    ph = req.placeholders
+    print(f"requirements: {args.req}: {len(ph)} of {len(req.sources)} values are placeholders")
+    return req, disp
+
+
+def _gen(args) -> dict:
+    return {"n_targets": args.targets, "per_target": args.per_target, "target_spread": args.spread}
+
+
+def _fmt_p(x: float) -> str:
+    return "n/a" if x != x else f"{x:.1e}"
+
+
+def cmd_assess(args) -> None:
+    from . import assess
+
+    req, disp = _req(args)
+    disp = dataclasses.replace(disp, is_scale=args.is_scale)
+    b = req.budget
+    seeds = range(args.start, args.start + args.seeds)
+    ok, times, fallbacks, (out,) = assess.run(
+        seeds, _gen(args), req.params, args.solver, [disp], args.trials, args.jobs
+    )
+    print(
+        f"seeds {seeds.start}..{seeds.stop - 1}: {args.targets} targets x {args.per_target} aircraft, "
+        f"solver {args.solver}, {args.trials} trials per plan"
+        + (f", importance sampling x{args.is_scale}" if args.is_scale != 1 else "")
+    )
+
+    def line(name, value, need, passed):
+        print(f"  {name:22s} {value:40s} need {need:12s} {'PASS' if passed else 'FAIL'}")
+
+    t99 = float(np.percentile(times, 99))
+    line(
+        "plan success",
+        f"{ok:.1%}" + (f" (bnb fallback in {fallbacks})" if fallbacks else ""),
+        f">= {b.plan_success_min:.0%}",
+        ok >= b.plan_success_min,
+    )
+    line(
+        "planning time p99", f"{t99:.2f} s (this machine)", f"<= {b.plan_time_p99_max:g} s", t99 <= b.plan_time_p99_max
+    )
+    if out is None:
+        print("  nothing planned")
+        return
+    m = assess.metrics(out, disp, b)
+    los = f"{m.los_events}/{m.trials}, est {_fmt_p(m.p_los)}, 95% upper {_fmt_p(m.p_los_upper)}"
+    line("P(loss of separation)", los, f"< {b.p_los_max:g}", m.p_los_upper < b.p_los_max)
+    if disp.is_scale != 1:
+        print(f"  {'':22s} effective sample size {m.ess:.0f} of {m.trials}")
+    elif m.los_events == 0 and m.p_los_upper >= b.p_los_max:
+        print(f"  {'':22s} zero losses, but {math.ceil(3 / b.p_los_max):,} trials are needed to show < {b.p_los_max:g}")
+    line(
+        "P(arrival miss)",
+        f"{m.p_arrival_miss:.2%}",
+        f"<= {b.p_arrival_miss_max:.0%}",
+        m.p_arrival_miss <= b.p_arrival_miss_max,
+    )
+    print(
+        f"  {'worst arrival error':22s} p95 {m.arrival_p95:.1f} s, p99 {m.arrival_p99:.1f} s "
+        f"(tolerance {disp.arrival_tol:g} s)"
+    )
+    print(
+        f"  {'P(repair needed)':22s} {m.p_repair:.2%} (an aircraft can tell it will miss; "
+        f"median warning {m.warning_median:.0f} s before arrival)"
+    )
+    if req.placeholders:
+        print("  placeholders in use, so a PASS means 'passes if the placeholder values hold'")
+
+
+def cmd_sweep(args) -> None:
+    from . import assess
+
+    req, disp = _req(args)
+    b = req.budget
+    scales = [float(x) for x in args.scales.split(",")]
+    cases = assess.sweep_disps(disp, scales)
+    seeds = range(args.start, args.start + args.seeds)
+    ok, _, _, outs = assess.run(
+        seeds, _gen(args), req.params, args.solver, [d for *_, d in cases], args.trials, args.jobs
+    )
+    n = outs[0].weight.size
+    print(
+        f"seeds {seeds.start}..{seeds.stop - 1}, solver {args.solver}, plan success {ok:.0%}, "
+        f"{n} pooled trials per case. Smallest provable P(LoS) bound at zero losses: {_fmt_p(assess.binom_upper(0, n))}"
+    )
+    print(
+        f"{'error term':16s} {'x':>4s} {'value':>7s} {'LoS':>6s} {'P(LoS) 95% up':>14s} "
+        f"{'P(miss)':>8s} {'arr p99':>8s} {'P(repair)':>9s}"
+    )
+    rows = {}
+    for (key, s, d), out in zip(cases, outs, strict=True):
+        m = assess.metrics(out, d, b)
+        rows.setdefault(key, []).append((s, d, m))
+    base = rows.pop("base")[0][2]
+    for key, rs in rows.items():
+        rs = sorted([*rs, (1.0, disp, base)], key=lambda r: r[0])
+        for s, d, m in rs:
+            print(
+                f"{key:16s} {s:4g} {getattr(d, key):7.2f} {m.los_events:6d} {_fmt_p(m.p_los_upper):>14s} "
+                f"{m.p_arrival_miss:8.2%} {m.arrival_p99:7.1f}s {m.p_repair:9.2%}"
+            )
+        safe = [getattr(d, key) for s, d, m in rs if m.p_los_upper < b.p_los_max or m.los_events == 0]
+        timely = [getattr(d, key) for s, d, m in rs if m.p_arrival_miss <= b.p_arrival_miss_max]
+        rows[key] = (max(safe, default=None), max(timely, default=None), rs[-1][2])
+    print("\nenvelope (largest tested value that still meets the budget; separation: zero losses observed)")
+    for key, (safe, timely, worst) in sorted(rows.items(), key=lambda kv: -kv[1][2].p_los - kv[1][2].p_arrival_miss):
+        print(
+            f"  {key:16s} now {getattr(disp, key):6.2f}  separation ok up to {safe if safe is not None else '-':>6}  "
+            f"arrival ok up to {timely if timely is not None else '-':>6}   at x{max(scales):g}: "
+            f"P(LoS) {_fmt_p(worst.p_los)}, P(miss) {worst.p_arrival_miss:.1%}"
+        )
+
+
 def cmd_gen(args) -> None:
     sc = scn.generate(args.seed, n_targets=args.targets, per_target=args.per_target, target_spread=args.spread)
     scn.save(sc, args.out)
@@ -230,7 +353,7 @@ def main(argv: list[str] | None = None) -> None:
 
     r = sub.add_parser("run", help="plan, verify, and visualize one scenario")
     scenario_args(r)
-    r.add_argument("--solver", choices=["greedy", "sector_greedy", "bnb", "both"], default="both")
+    r.add_argument("--solver", choices=["greedy", "sector_greedy", "rules", "rules_bnb", "bnb", "both"], default="both")
     r.add_argument("--gif", help="write an animation, e.g. out.gif")
     r.add_argument("--png", help="write a still, e.g. out.png")
     r.add_argument("--no-show", action="store_true", help="do not open a window")
@@ -247,6 +370,29 @@ def main(argv: list[str] | None = None) -> None:
     b.add_argument("--mc", type=int, default=0, help="Monte Carlo trials per bnb plan (0 = off)")
     b.add_argument("--param", action="append", metavar="KEY=VALUE", help="override a Params field (repeatable)")
     b.set_defaults(func=cmd_bench)
+
+    def assess_args(p, seeds, trials):
+        p.add_argument("--req", default="requirements.toml", help="requirements file")
+        p.add_argument("--seeds", type=int, default=seeds)
+        p.add_argument("--start", type=int, default=0)
+        p.add_argument("--jobs", type=int, default=None)
+        p.add_argument("--targets", type=int, default=2)
+        p.add_argument("--per-target", type=int, default=3)
+        p.add_argument("--spread", type=float, default=1500.0)
+        p.add_argument("--trials", type=int, default=trials, help="Monte Carlo trials per plan")
+        p.add_argument("--solver", choices=["sector_greedy", "rules", "rules_bnb", "bnb"], default="rules_bnb")
+        p.add_argument("--param", action="append", metavar="KEY=VALUE", help="override a Params field")
+        p.add_argument("--err", action="append", metavar="KEY=VALUE", help="override an error term")
+
+    a = sub.add_parser("assess", help="judge a planner against requirements.toml")
+    assess_args(a, 50, 600)
+    a.add_argument("--is-scale", type=float, default=1.0, help="importance sampling: widen constant errors by this")
+    a.set_defaults(func=cmd_assess)
+
+    w = sub.add_parser("sweep", help="sensitivity of the metrics to each error term")
+    assess_args(w, 50, 400)
+    w.add_argument("--scales", default="0.5,1,2,4", help="multipliers applied to each error term in turn")
+    w.set_defaults(func=cmd_sweep)
 
     g = sub.add_parser("gen", help="write a generated scenario to JSON")
     g.add_argument("out")

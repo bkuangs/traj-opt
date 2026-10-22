@@ -1,9 +1,19 @@
 """Monte Carlo robustness check: replay a plan under execution errors.
 
 Each trial perturbs every chosen aircraft with a constant wind (ground-speed bias), a start-time error,
-a constant cross-track offset, and a constant altitude offset. Each aircraft flies its planned path and
-tracks its planned schedule with a proportional speed controller, saturated at [v_min, v_max] airspeed.
-That saturation is where a thin speed margin shows up: an aircraft at its limit cannot recover lost time.
+a constant cross-track offset, and a constant altitude offset. Optional terms (all off by default):
+a gust (along-track wind that varies over time, first-order Gauss-Markov), cross-track drift (same
+process), extra cross-track error in turns (proportional to path curvature, e.g. overshoot), and an
+altimeter bias common to all aircraft (affects terrain clearance only).
+
+Each aircraft flies its planned path and tracks its planned schedule with a proportional (optionally
+proportional-integral) speed controller, saturated at [v_min, v_max] airspeed. That saturation is where
+a thin speed margin shows up: an aircraft at its limit cannot recover lost time.
+
+Importance sampling: with is_scale > 1, the constant per-aircraft errors named in is_vars are drawn with
+is_scale times their standard deviation, and each trial carries a likelihood-ratio weight, so weighted
+averages remain unbiased while rare failures are sampled more often. Widen only the terms that drive the
+failure: every widened dimension shrinks the effective sample size (about 1.2x per dimension at 1.5).
 """
 
 from __future__ import annotations
@@ -22,9 +32,18 @@ class Dispersions:
     start_delay_sd: float = 3.0  # s, schedule error at plan start (+ = late)
     cross_track_sd: float = 10.0  # m
     alt_sd: float = 5.0  # m
-    gain: float = 0.1  # 1/s, schedule-tracking speed controller
+    gain: float = 0.1  # 1/s, schedule-tracking speed controller (proportional)
+    gain_i: float = 0.0  # 1/s^2, integral term; removes the steady error a constant wind leaves (wind / gain)
     arrival_tol: float = 2.0  # s, allowed |ingress time error|
     dt: float = 0.2  # s, simulation step
+    gust_sd: float = 0.0  # m/s, time-varying along-track wind
+    gust_tau: float = 20.0  # s, gust correlation time
+    xtrack_drift_sd: float = 0.0  # m, time-varying cross-track error
+    xtrack_tau: float = 60.0  # s
+    turn_xtrack_sd: float = 0.0  # m, extra cross-track error at full-rate turns (scaled by curvature * r_min)
+    alt_bias_sd: float = 0.0  # m, altimeter bias shared by all aircraft
+    is_scale: float = 1.0  # importance-sampling widening of the constant per-aircraft errors named in is_vars
+    is_vars: tuple[str, ...] = ("cross_track_sd", "alt_sd")
 
 
 @dataclass
@@ -38,6 +57,15 @@ class Robustness:
     pair_loss: dict[tuple[int, int], float] = field(default_factory=dict)
     # P(aircraft arrives within arrival_tol with no terrain or separation violation), per aircraft id
     p_deliver: dict[int, float] = field(default_factory=dict)
+    # Per-trial outcomes, for pooling across plans. Probabilities above are weighted by `weight`;
+    # the percentiles are not, so they are only meaningful with is_scale = 1.
+    weight: np.ndarray = field(default=None, compare=False, repr=False)
+    sep_loss: np.ndarray = field(default=None, compare=False, repr=False)
+    arrival_err: np.ndarray = field(default=None, compare=False, repr=False)  # s, worst aircraft
+    min_sep: np.ndarray = field(default=None, compare=False, repr=False)  # worst separation ratio
+    # s before the planned arrival at which some aircraft's schedule error first exceeded what full speed
+    # authority could still recover (a predictable miss, the trigger for an in-flight repair); 0 = never
+    warning: np.ndarray = field(default=None, compare=False, repr=False)
 
     def summary(self) -> str:
         worst = max(self.pair_loss.items(), key=lambda kv: kv[1], default=(None, 0.0))
@@ -51,6 +79,16 @@ class Robustness:
         return s
 
 
+def _gauss_markov(rng, sd: float, tau: float, dt: float, steps: int, shape: tuple) -> np.ndarray:
+    """Stationary first-order Gauss-Markov process, shape (steps, *shape)."""
+    a = np.exp(-dt / tau)
+    out = np.empty((steps, *shape))
+    out[0] = rng.normal(0.0, sd, shape)
+    for k in range(1, steps):
+        out[k] = a * out[k - 1] + np.sqrt(1.0 - a * a) * rng.normal(0.0, sd, shape)
+    return out
+
+
 def monte_carlo(sc: Scenario, plan: Plan, trials: int = 200, disp: Dispersions | None = None, seed: int = 0):
     disp = disp or Dispersions()
     p = sc.params
@@ -61,10 +99,23 @@ def monte_carlo(sc: Scenario, plan: Plan, trials: int = 200, disp: Dispersions |
     rng = np.random.default_rng(seed)
     n = len(chosen)
     shape = (trials, n)
-    wind = rng.normal(0.0, disp.wind_sd, shape)
-    delay = rng.normal(0.0, disp.start_delay_sd, shape)
-    xtrack = rng.normal(0.0, disp.cross_track_sd, shape)
-    dalt = rng.normal(0.0, disp.alt_sd, shape)
+    names = ("wind_sd", "start_delay_sd", "cross_track_sd", "alt_sd", "turn_xtrack_sd")
+    unknown = set(disp.is_vars) - set(names)
+    if unknown:
+        raise ValueError(f"is_vars: {sorted(unknown)} not in {names}")
+    z = {k: rng.standard_normal(shape) for k in names[:4]}
+    z["turn_xtrack_sd"] = rng.standard_normal(shape)
+    lam = {k: disp.is_scale if k in disp.is_vars else 1.0 for k in names}
+    draw = {k: lam[k] * getattr(disp, k) * z[k] for k in names}
+    wind, delay, xtrack, turn = draw["wind_sd"], draw["start_delay_sd"], draw["cross_track_sd"], draw["turn_xtrack_sd"]
+    dalt = draw["alt_sd"] + rng.normal(0.0, disp.alt_bias_sd, (trials, 1))
+    # log p(x)/q(x) for each widened draw, written in terms of the standard normal z.
+    log_w = np.zeros(trials)
+    for k in names:
+        if lam[k] != 1.0 and getattr(disp, k) > 0:
+            log_w += (0.5 * z[k] ** 2 * (1.0 - lam[k] ** 2) + np.log(lam[k])).sum(axis=1)
+    weight = np.exp(log_w)
+    lam = disp.is_scale
 
     v_plan = np.array([c.speed for _, c in chosen])
     v_min = np.array([acs[k].v_min for k, _ in chosen])
@@ -74,12 +125,25 @@ def monte_carlo(sc: Scenario, plan: Plan, trials: int = 200, disp: Dispersions |
 
     # Schedule tracking along the planned path (arc length s).
     t = np.arange(0.0, 1.5 * max(c.traj.t[-1] for _, c in chosen), disp.dt)
+    gust = _gauss_markov(rng, disp.gust_sd, disp.gust_tau, disp.dt, t.size, shape) if disp.gust_sd > 0 else None
     s = np.empty((t.size, trials, n))
     s[0] = -v_plan * delay
+    # Fraction of nominal speed available to catch up (late) or slow down (early).
+    up, down = (v_max - v_plan) / v_plan, (v_plan - v_min) / v_plan
+    flag_t = np.full(shape, np.inf)
+    integ = np.zeros(shape)
     for k in range(1, t.size):
         err = v_plan * t[k - 1] - s[k - 1]
-        air = np.clip(v_plan + disp.gain * err, v_min, v_max)
-        s[k] = s[k - 1] + (air + wind) * disp.dt
+        cmd = v_plan + disp.gain * err + disp.gain_i * integ
+        air = np.clip(cmd, v_min, v_max)
+        if disp.gain_i:
+            integ = np.where(cmd == air, integ + err * disp.dt, integ)  # no integration while saturated
+        w = wind if gust is None else wind + gust[k - 1]
+        s[k] = s[k - 1] + (air + w) * disp.dt
+        late = t[k] - s[k] / v_plan  # s behind schedule
+        t_left = plan.T - t[k]
+        lost = np.where(late > 0, late - up * t_left, -late - down * t_left) > disp.arrival_tol
+        flag_t = np.where(lost & (s[k] < l_ing) & (t_left > 0) & np.isinf(flag_t), t[k], flag_t)
 
     # Ingress time error: first crossing of the ingress arc length.
     crossed = s >= l_ing
@@ -87,10 +151,16 @@ def monte_carlo(sc: Scenario, plan: Plan, trials: int = 200, disp: Dispersions |
     t_ing = np.where(hit, t[crossed.argmax(axis=0)], np.inf)
     arrival_err = np.abs(t_ing - plan.T).max(axis=1)
 
+    drift = (
+        _gauss_markov(rng, disp.xtrack_drift_sd, disp.xtrack_tau, disp.dt, t.size, shape)
+        if disp.xtrack_drift_sd > 0
+        else 0.0
+    )
+
     # Positions (with offsets) while each aircraft is still inside its planned horizon.
     active = s < l_end
     xyz = np.empty((t.size, trials, n, 3))
-    for i, (_, c) in enumerate(chosen):
+    for i, (k_ac, c) in enumerate(chosen):
         si = c.speed * c.traj.t
         pts = c.traj.xyz
         tan = np.gradient(pts[:, :2], axis=0)
@@ -100,8 +170,13 @@ def monte_carlo(sc: Scenario, plan: Plan, trials: int = 200, disp: Dispersions |
         y = np.interp(q, si, pts[:, 1]) + np.minimum(q, 0) * tan[0, 1]
         tx, ty = np.interp(q, si, tan[:, 0]), np.interp(q, si, tan[:, 1])
         nrm = np.hypot(tx, ty)
-        xyz[:, :, i, 0] = x - xtrack[:, i] * ty / nrm
-        xyz[:, :, i, 1] = y + xtrack[:, i] * tx / nrm
+        off = xtrack[:, i] + (drift[:, :, i] if np.ndim(drift) else 0.0)
+        if disp.turn_xtrack_sd > 0:
+            heading = np.unwrap(np.arctan2(tan[:, 1], tan[:, 0]))
+            kappa = np.clip(np.gradient(heading, si) * acs[k_ac].r_min, -1.0, 1.0)  # signed, 1 = full-rate turn
+            off = off + turn[:, i] * np.interp(q, si, kappa)
+        xyz[:, :, i, 0] = x - off * ty / nrm
+        xyz[:, :, i, 1] = y + off * tx / nrm
         xyz[:, :, i, 2] = np.interp(q, si, pts[:, 2]) + dalt[:, i]
 
     clearance = xyz[..., 2] - sc.terrain.height(xyz[..., 0], xyz[..., 1])
@@ -111,6 +186,11 @@ def monte_carlo(sc: Scenario, plan: Plan, trials: int = 200, disp: Dispersions |
 
     worst = np.full(trials, np.inf)
     pair_loss = {}
+    wsum = weight.sum()
+
+    def wmean(x) -> float:
+        return float((weight * x).sum() / wsum) if lam != 1.0 else float(np.mean(x))
+
     for (i, (a, _)), (j, (b, _)) in combinations(enumerate(chosen), 2):
         d = xyz[:, :, i] - xyz[:, :, j]
         ratio = np.maximum(np.hypot(d[..., 0], d[..., 1]) / p.sep_h, np.abs(d[..., 2]) / p.sep_v)
@@ -118,15 +198,20 @@ def monte_carlo(sc: Scenario, plan: Plan, trials: int = 200, disp: Dispersions |
         worst = np.minimum(worst, m)
         failed[:, i] |= m < 1.0
         failed[:, j] |= m < 1.0
-        pair_loss[(a, b)] = float((m < 1.0).mean())
+        pair_loss[(a, b)] = wmean(m < 1.0)
 
     return Robustness(
         trials=trials,
-        p_sep_loss=float((worst < 1.0).mean()),
-        p_terrain=float(terrain_bad.mean()),
-        p_arrival_miss=float((arrival_err > disp.arrival_tol).mean()),
+        p_sep_loss=wmean(worst < 1.0),
+        p_terrain=wmean(terrain_bad),
+        p_arrival_miss=wmean(arrival_err > disp.arrival_tol),
         arrival_err_p95=float(np.percentile(arrival_err, 95)),
         min_sep_p05=float(np.percentile(worst, 5)),
         pair_loss=pair_loss,
-        p_deliver={a: float(1.0 - failed[:, i].mean()) for i, (a, _) in enumerate(chosen)},
+        p_deliver={a: 1.0 - wmean(failed[:, i]) for i, (a, _) in enumerate(chosen)},
+        weight=weight,
+        sep_loss=worst < 1.0,
+        arrival_err=arrival_err,
+        min_sep=worst,
+        warning=np.where(np.isfinite(flag_t), plan.T - flag_t, 0.0).max(axis=1),
     )

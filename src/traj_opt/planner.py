@@ -62,6 +62,8 @@ SOLVERS = {
     "greedy_drops": select.greedy_with_drops,
     "sector_greedy": select.sector_greedy,
     "bnb": select.bnb,
+    "rules": select.rules,
+    "rules_bnb": select.rules_bnb,
 }
 
 

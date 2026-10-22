@@ -5,6 +5,11 @@ greedy_with_drops: same, but drops a stuck aircraft and continues (bnb's incumbe
 sector_greedy: per target, jointly assign approach angles (all pairs >= min_sector apart, minimum total
         best-candidate cost), then greedy restricted to the assigned angles. A cheap fix for the dominant
         greedy failure (teammates competing for the same approach arc).
+rules:  procedural baseline, no search. Each aircraft gets an approach sector (as sector_greedy) and its
+        target's altitude layer (one layer per target, by target priority: 0, +1, -1, ...), then the
+        cheapest conflict-free route in exactly that sector and layer. Fails rather than relaxing a rule.
+        Best with alt_bands=true (shared absolute bands) and alt_step >= 60 m.
+rules_bnb: rules, and bnb only when the rules fail.
 bnb:    joint optimum. Depth-first branch-and-bound that branches on the most-constrained aircraft next
         (fewest unblocked candidates), cheapest candidates first, with an admissible bound (cost so far +
         each remaining aircraft's cheapest still-unblocked option or its drop cost). The incumbent starts
@@ -96,6 +101,30 @@ def sector_greedy(sc: Scenario, T: float, cands: dict[int, list[Candidate]], con
         return Plan("sector_greedy", T, {}, float("inf"), status="NO_SAFE_PLAN", reason="no valid sector assignment")
     plan = greedy(sc, T, {ac: [c for c in cs if c.ingress_angle == sectors[ac]] for ac, cs in cands.items()}, conflicts)
     plan.solver = "sector_greedy"
+    return plan
+
+
+def rules(sc: Scenario, T: float, cands: dict[int, list[Candidate]], conflicts: dict[int, set[int]]) -> Plan:
+    sectors = assign_sectors(sc, cands)
+    if sectors is None:
+        return Plan("rules", T, {}, float("inf"), status="NO_SAFE_PLAN", reason="no valid sector assignment")
+    layers = sorted({c.alt_offset for cs in cands.values() for c in cs}, key=lambda x: (abs(x), -x))
+    tgt_rank = {t.id: i for i, t in enumerate(sorted(sc.targets, key=lambda t: (-t.value, t.id)))}
+    layer = {a.id: layers[tgt_rank[sc.target_of(a.id).id] % len(layers)] for a in sc.aircraft}
+    menu = {
+        ac: [c for c in cs if c.ingress_angle == sectors[ac] and c.alt_offset == layer[ac]] for ac, cs in cands.items()
+    }
+    plan = greedy(sc, T, menu, conflicts)
+    plan.solver = "rules"
+    return plan
+
+
+def rules_bnb(sc: Scenario, T: float, cands: dict[int, list[Candidate]], conflicts: dict[int, set[int]]) -> Plan:
+    plan = rules(sc, T, cands, conflicts)
+    if plan.status != "CONFLICT_FREE":
+        plan = bnb(sc, T, cands, conflicts)
+        plan.extra["fallback"] = True
+    plan.solver = "rules_bnb"
     return plan
 
 

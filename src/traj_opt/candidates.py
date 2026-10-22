@@ -175,10 +175,15 @@ def build_candidates(sc: Scenario, ac: Aircraft, T: float) -> list[Candidate]:
         for geom, chain in geoms:
             speed = chain.length / T
             lateral = _lateral(chain, q0, q1, p.dx)
-            z_base = max(ac.z, _terrain_floor(sc, chain, q1) + p.terrain_margin)
-            for layer in range(-p.alt_layers, p.alt_layers + 1):
-                z1 = z_base + layer * p.alt_step
-                if not ac.z_min <= z1 <= ac.z_max:
+            z_floor = _terrain_floor(sc, chain, q1) + p.terrain_margin
+            if p.alt_bands:  # shared absolute bands above the highest start, band 0 lowest
+                top = max(a.z for a in sc.aircraft)
+                levels = [(k, top + k * p.alt_step) for k in range(2 * p.alt_layers + 1)]
+            else:  # offsets around this aircraft's own cruise altitude
+                z_base = max(ac.z, z_floor)
+                levels = [(k, z_base + k * p.alt_step) for k in range(-p.alt_layers, p.alt_layers + 1)]
+            for layer, z1 in levels:
+                if (p.alt_bands and z1 < z_floor) or not ac.z_min <= z1 <= ac.z_max:
                     continue
                 traj = _trajectory(chain, q1, tgt, ac.z, z1, speed, 0.8 * ac.climb_rate, sc)
                 cost = tgt.value * (

@@ -1,0 +1,30 @@
+# Every number the safety and timing claims rest on, with where it came from.
+# source = "placeholder" (a guess), "spec" (a written requirement), or "measured" (fitted to flight data).
+# While anything below is a placeholder, results must be stated as "meets requirements if X < threshold".
+
+[separation]
+sep_h = { value = 50.0, unit = "m", source = "placeholder", note = "horizontal minimum; loss needs both h and v broken" }
+sep_v = { value = 30.0, unit = "m", source = "placeholder", note = "vertical minimum" }
+
+[timing]
+arrival_tol = { value = 2.0, unit = "s", source = "placeholder", note = "allowed |arrival time error| per aircraft" }
+speed_margin = { value = 0.15, unit = "fraction", source = "placeholder", note = "share of the speed band kept free at each end for timing control" }
+gain = { value = 0.1, unit = "1/s", source = "placeholder", note = "schedule-tracking speed controller gain" }
+
+[budget]
+p_los_max = { value = 1e-4, unit = "per mission", source = "placeholder", note = "P(any loss of separation), 95% upper bound must be below this" }
+p_arrival_miss_max = { value = 0.01, unit = "per mission", source = "placeholder", note = "P(any aircraft outside arrival_tol)" }
+plan_success_min = { value = 0.95, unit = "fraction", source = "placeholder", note = "missions where every aircraft gets a safe plan" }
+plan_time_p99_max = { value = 5.0, unit = "s", source = "placeholder", note = "p99 planning time (measured on this machine, not the flight computer)" }
+
+[errors]
+wind_sd = { value = 1.0, unit = "m/s", source = "placeholder", note = "constant along-track wind error" }
+gust_sd = { value = 1.0, unit = "m/s", source = "placeholder", note = "time-varying along-track wind" }
+gust_tau = { value = 20.0, unit = "s", source = "placeholder", note = "gust correlation time" }
+start_delay_sd = { value = 3.0, unit = "s", source = "placeholder", note = "schedule error when the plan starts" }
+cross_track_sd = { value = 10.0, unit = "m", source = "placeholder", note = "constant cross-track error" }
+xtrack_drift_sd = { value = 10.0, unit = "m", source = "placeholder", note = "time-varying cross-track error" }
+xtrack_tau = { value = 60.0, unit = "s", source = "placeholder", note = "cross-track drift correlation time" }
+turn_xtrack_sd = { value = 15.0, unit = "m", source = "placeholder", note = "extra cross-track error in full-rate turns (overshoot)" }
+alt_sd = { value = 5.0, unit = "m", source = "placeholder", note = "altitude error between aircraft" }
+alt_bias_sd = { value = 10.0, unit = "m", source = "placeholder", note = "altimeter bias shared by all aircraft (terrain only)" }
